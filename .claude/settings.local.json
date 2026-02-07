@@ -9,7 +9,16 @@
       "Bash(gh repo create:*)",
       "Bash(git checkout:*)",
       "Bash(chmod:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(for branch in feature/phase1-core-infrastructure feature/phase2-agents feature/phase2-implementations feature/phase2-integration)",
+      "Bash(do echo \"=== $branch ===\")",
+      "Bash(done)",
+      "Bash(git branch:*)",
+      "Bash(for branch in feature/phase1-core-infrastructure feature/phase2-agents feature/phase2-integration feature/research-coordinator-agent feature/trading-decision-agent)",
+      "Bash(find:*)",
+      "Bash(git remote set-head:*)",
+      "Bash(git remote prune:*)",
+      "Bash(gh repo edit:*)"
     ]
   }
 }
