@@ -1,0 +1,220 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://trading-system/schemas/execution_intent.schema.json",
+  "title": "Execution Intent Schema",
+  "description": "Risk-approved execution intent sent to Execution Agent",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "agent_id",
+    "correlation_id",
+    "timestamp",
+    "intent_id",
+    "approval_id",
+    "decision_id",
+    "symbol",
+    "side",
+    "execution_mode",
+    "position_size_usdt",
+    "leverage",
+    "entry_price",
+    "stop_loss",
+    "take_profit_levels"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Schema version (semantic versioning)",
+      "const": "1.0.0"
+    },
+    "agent_id": {
+      "type": "string",
+      "const": "risk-manager",
+      "description": "Originating agent identifier (Risk Manager sends this to Execution Agent)"
+    },
+    "correlation_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique ID linking all messages in this trading cycle"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Message generation timestamp"
+    },
+    "intent_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier for this execution intent"
+    },
+    "approval_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Reference to risk approval that authorized this execution"
+    },
+    "decision_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Reference to original trading decision"
+    },
+    "symbol": {
+      "type": "string",
+      "pattern": "^[A-Z]+USDT$",
+      "description": "Trading pair symbol"
+    },
+    "side": {
+      "type": "string",
+      "enum": ["LONG", "SHORT"],
+      "description": "Trade direction"
+    },
+    "execution_mode": {
+      "type": "string",
+      "enum": ["PAPER", "LIVE", "HYBRID"],
+      "description": "Execution mode to use"
+    },
+    "position_size_usdt": {
+      "type": "number",
+      "minimum": 0,
+      "exclusiveMinimum": true,
+      "description": "Risk-approved position size in USDT (must be > 0)"
+    },
+    "leverage": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 20,
+      "description": "Risk-approved leverage"
+    },
+    "entry_price": {
+      "type": "number",
+      "minimum": 0,
+      "exclusiveMinimum": true,
+      "description": "Target entry price"
+    },
+    "stop_loss": {
+      "type": "number",
+      "minimum": 0,
+      "exclusiveMinimum": true,
+      "description": "Risk-approved stop loss price"
+    },
+    "take_profit_levels": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["price", "quantity_pct"],
+        "properties": {
+          "price": {
+            "type": "number",
+            "minimum": 0,
+            "exclusiveMinimum": true,
+            "description": "Take profit price level"
+          },
+          "quantity_pct": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "exclusiveMinimum": true,
+            "description": "Percentage of position to close (must be > 0)"
+          }
+        }
+      },
+      "description": "Take profit levels (percentages must sum to 1.0 or less)"
+    },
+    "strategy_id": {
+      "type": "string",
+      "enum": [
+        "ema_crossover_scalp",
+        "vwap_bounce_scalp",
+        "orderbook_imbalance_scalp",
+        "momentum_breakout_scalp"
+      ],
+      "description": "Strategy that generated the original decision"
+    },
+    "expected_holding_time_seconds": {
+      "type": "integer",
+      "minimum": 30,
+      "maximum": 3600,
+      "description": "Expected holding time for this position"
+    },
+    "risk_parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_risk_usdt", "risk_per_trade_pct", "stop_loss_distance_pct"],
+      "properties": {
+        "max_risk_usdt": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Maximum risk in USDT for this trade"
+        },
+        "risk_per_trade_pct": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Risk as percentage of account equity"
+        },
+        "stop_loss_distance_pct": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Stop loss distance as percentage from entry"
+        }
+      },
+      "description": "Risk parameters calculated by Risk Manager"
+    },
+    "order_instructions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "order_type": {
+          "type": "string",
+          "enum": ["MARKET", "LIMIT"],
+          "default": "MARKET",
+          "description": "Order type to use for entry"
+        },
+        "time_in_force": {
+          "type": "string",
+          "enum": ["GTC", "IOC", "FOK"],
+          "default": "GTC",
+          "description": "Time in force for limit orders"
+        },
+        "reduce_only": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether this is a reduce-only order"
+        },
+        "post_only": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether to use post-only (maker) orders"
+        }
+      },
+      "description": "Specific order execution instructions"
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "was_modified": {
+          "type": "boolean",
+          "description": "Whether Risk Manager modified the original decision parameters"
+        },
+        "modification_reason": {
+          "type": "string",
+          "description": "Reason for parameter modification (if modified)"
+        },
+        "original_position_size_usdt": {
+          "type": "number",
+          "description": "Original requested position size (if modified)"
+        },
+        "original_leverage": {
+          "type": "integer",
+          "description": "Original requested leverage (if modified)"
+        }
+      },
+      "description": "Metadata about risk approval and modifications"
+    }
+  }
+}

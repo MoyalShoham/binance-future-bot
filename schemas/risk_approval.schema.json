@@ -4,14 +4,35 @@
   "title": "Risk Approval Schema",
   "description": "Risk Manager approval/rejection/modification output",
   "type": "object",
+  "additionalProperties": false,
   "required": [
+    "schema_version",
+    "agent_id",
+    "correlation_id",
+    "timestamp",
     "approval_id",
     "decision_id",
     "approval_status",
-    "timestamp",
-    "risk_checks"
+    "risk_checks",
+    "account_status"
   ],
   "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Schema version (semantic versioning)",
+      "const": "1.0.0"
+    },
+    "agent_id": {
+      "type": "string",
+      "const": "risk-manager",
+      "description": "Originating agent identifier"
+    },
+    "correlation_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique ID linking all messages in this trading cycle"
+    },
     "approval_id": {
       "type": "string",
       "format": "uuid",

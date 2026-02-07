@@ -15,14 +15,11 @@ import structlog
 from orchestration import TradingCoordinator, StateManager, ModelRouter
 from orchestration.state_manager import ExecutionMode
 from agents.implementations import (
-    ResearchCoordinatorAgent,
-    TradingDecisionAgent,
     RiskManagerAgent,
-    ExecutionAgent,
     StorageReporterAgent,
-    EmergencyControllerAgent
 )
 from infrastructure.binance_api import BinanceFuturesClient
+from infrastructure.database import init_database
 
 # Configure structured logging
 structlog.configure(
@@ -109,27 +106,29 @@ def initialize_binance_client(config: dict) -> BinanceFuturesClient:
     return client
 
 
-def initialize_agents(config: dict, binance_client: BinanceFuturesClient) -> dict:
+def initialize_agents(config: dict, binance_client: BinanceFuturesClient, db_session) -> dict:
     """
     Initialize all trading agents.
 
     Args:
         config: Trading configuration
         binance_client: Binance API client
+        db_session: Database session instance
 
     Returns:
         Dict of initialized agents
     """
     agents = {
-        "research_coordinator": ResearchCoordinatorAgent(config),
-        "trading_decision": TradingDecisionAgent(config),
-        "risk_manager": RiskManagerAgent(config, binance_client),
-        "execution_agent": ExecutionAgent(config),
-        "storage_reporter": StorageReporterAgent(config),
-        "emergency_controller": EmergencyControllerAgent(config)
+        # TODO: Implement remaining agents
+        # "research_coordinator": ResearchCoordinatorAgent("research-coordinator", config),
+        # "trading_decision": TradingDecisionAgent("trading-decision", config),
+        "risk_manager": RiskManagerAgent("risk-manager", config, binance_client, db_session),
+        # "execution_agent": ExecutionAgent("execution-agent", config),
+        "storage_reporter": StorageReporterAgent("storage-reporter", config, db_session),
+        # "emergency_controller": EmergencyControllerAgent("emergency-controller", config)
     }
 
-    logger.info("All agents initialized", agent_count=len(agents))
+    logger.info("Agents initialized", agent_count=len(agents))
     return agents
 
 
@@ -221,11 +220,16 @@ def main():
         config = load_config(args.config)
         load_environment()
 
+        # Initialize database
+        logger.info("Initializing database...")
+        db_session = init_database(config)
+        logger.info("Database initialized successfully")
+
         # Initialize Binance client
         binance_client = initialize_binance_client(config)
 
         # Initialize agents
-        agents = initialize_agents(config, binance_client)
+        agents = initialize_agents(config, binance_client, db_session)
 
         # Initialize coordinator
         coordinator = TradingCoordinator(config)
@@ -261,6 +265,11 @@ def main():
         # Cleanup
         if 'emergency_controller' in locals() and emergency_controller:
             emergency_controller.stop_continuous_monitoring()
+
+        # Close database connection
+        if 'db_session' in locals() and db_session:
+            db_session.close()
+            logger.info("Database connection closed")
 
         logger.info("System shutdown complete")
 
