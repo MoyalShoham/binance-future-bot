@@ -4,7 +4,10 @@
       "WebSearch",
       "WebFetch(domain:github.com)",
       "Bash(git init:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(gh repo create:*)",
+      "Bash(git checkout:*)"
     ]
   }
 }

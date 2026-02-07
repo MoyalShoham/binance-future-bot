@@ -1,0 +1,230 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://trading-system/schemas/risk_approval.schema.json",
+  "title": "Risk Approval Schema",
+  "description": "Risk Manager approval/rejection/modification output",
+  "type": "object",
+  "required": [
+    "approval_id",
+    "decision_id",
+    "approval_status",
+    "timestamp",
+    "risk_checks"
+  ],
+  "properties": {
+    "approval_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier for this risk approval"
+    },
+    "decision_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Reference to the trading decision being evaluated"
+    },
+    "approval_status": {
+      "type": "string",
+      "enum": ["APPROVED", "REJECTED", "MODIFIED"],
+      "description": "Risk approval decision"
+    },
+    "rejection_reason": {
+      "type": "string",
+      "description": "Explanation if status is REJECTED"
+    },
+    "modified_parameters": {
+      "type": "object",
+      "properties": {
+        "position_size_usdt": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Risk-adjusted position size"
+        },
+        "leverage": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20,
+          "description": "Risk-adjusted leverage"
+        },
+        "stop_loss": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Risk-adjusted stop loss"
+        },
+        "take_profit_levels": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "price": {"type": "number", "minimum": 0},
+              "quantity_pct": {"type": "number", "minimum": 0, "maximum": 1}
+            }
+          }
+        }
+      },
+      "description": "Modified parameters if status is MODIFIED"
+    },
+    "risk_checks": {
+      "type": "object",
+      "required": [
+        "max_risk_per_trade",
+        "max_daily_drawdown",
+        "max_portfolio_exposure"
+      ],
+      "properties": {
+        "max_risk_per_trade": {
+          "$ref": "#/definitions/risk_check"
+        },
+        "max_daily_drawdown": {
+          "$ref": "#/definitions/risk_check"
+        },
+        "max_portfolio_exposure": {
+          "$ref": "#/definitions/risk_check"
+        },
+        "leverage_limit": {
+          "$ref": "#/definitions/risk_check"
+        },
+        "correlation_check": {
+          "$ref": "#/definitions/risk_check"
+        },
+        "volatility_gate": {
+          "$ref": "#/definitions/risk_check"
+        },
+        "position_concentration": {
+          "$ref": "#/definitions/risk_check"
+        },
+        "available_margin": {
+          "$ref": "#/definitions/risk_check"
+        }
+      },
+      "description": "Results of all risk validation checks"
+    },
+    "position_sizing": {
+      "type": "object",
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": ["kelly_criterion", "fixed_percentage", "atr_based", "volatility_adjusted"]
+        },
+        "kelly_fraction": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Kelly fraction used (if method is kelly_criterion)"
+        },
+        "risk_per_trade_usdt": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Actual risk amount in USDT"
+        },
+        "risk_per_trade_pct": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Risk as percentage of account"
+        },
+        "stop_loss_distance_pct": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Stop loss distance as percentage"
+        }
+      }
+    },
+    "account_status": {
+      "type": "object",
+      "required": ["available_balance", "total_equity", "current_exposure"],
+      "properties": {
+        "available_balance": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Available balance in USDT"
+        },
+        "total_equity": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Total account equity in USDT"
+        },
+        "current_exposure": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Current total position exposure in USDT"
+        },
+        "unrealized_pnl": {
+          "type": "number",
+          "description": "Unrealized P&L in USDT"
+        },
+        "daily_pnl": {
+          "type": "number",
+          "description": "Today's realized P&L in USDT"
+        },
+        "daily_drawdown_pct": {
+          "type": "number",
+          "description": "Current daily drawdown percentage"
+        },
+        "open_positions_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "kill_switches": {
+      "type": "object",
+      "properties": {
+        "global_trading_enabled": {
+          "type": "boolean",
+          "description": "Global kill switch status"
+        },
+        "symbol_enabled": {
+          "type": "boolean",
+          "description": "Symbol-specific trading status"
+        },
+        "strategy_enabled": {
+          "type": "boolean",
+          "description": "Strategy-specific trading status"
+        },
+        "volatility_breaker_active": {
+          "type": "boolean",
+          "description": "Volatility circuit breaker status"
+        }
+      }
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When this approval was processed"
+    },
+    "processing_time_ms": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Time taken for risk evaluation"
+    }
+  },
+  "definitions": {
+    "risk_check": {
+      "type": "object",
+      "required": ["passed", "current_value", "limit"],
+      "properties": {
+        "passed": {
+          "type": "boolean",
+          "description": "Whether this risk check passed"
+        },
+        "current_value": {
+          "type": "number",
+          "description": "Current value being checked"
+        },
+        "limit": {
+          "type": "number",
+          "description": "Risk limit threshold"
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "warning", "critical"],
+          "description": "Severity level if check failed"
+        },
+        "message": {
+          "type": "string",
+          "description": "Additional context or warning message"
+        }
+      }
+    }
+  }
+}

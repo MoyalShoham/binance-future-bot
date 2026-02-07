@@ -1,0 +1,162 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://trading-system/schemas/trading_decision.schema.json",
+  "title": "Trading Decision Schema",
+  "description": "Trading decision output from Trading Decision Agent",
+  "type": "object",
+  "required": [
+    "decision_id",
+    "symbol",
+    "decision",
+    "confidence",
+    "strategy_id",
+    "timestamp"
+  ],
+  "properties": {
+    "decision_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier for this trading decision"
+    },
+    "symbol": {
+      "type": "string",
+      "pattern": "^[A-Z]+USDT$",
+      "description": "Trading pair symbol"
+    },
+    "decision": {
+      "type": "string",
+      "enum": ["NO_TRADE", "LONG", "SHORT"],
+      "description": "Trading direction decision"
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Confidence level in this decision"
+    },
+    "expected_holding_time_seconds": {
+      "type": "integer",
+      "minimum": 30,
+      "maximum": 3600,
+      "description": "Expected time to hold position (for scalping strategies)"
+    },
+    "strategy_id": {
+      "type": "string",
+      "enum": [
+        "ema_crossover_scalp",
+        "vwap_bounce_scalp",
+        "orderbook_imbalance_scalp",
+        "momentum_breakout_scalp"
+      ],
+      "description": "Strategy that generated this decision"
+    },
+    "model_used": {
+      "type": "string",
+      "enum": ["gpt-4o-nano", "gemini-1.5-flash", "claude-3.5-haiku", "claude-3.7-sonnet"],
+      "description": "AI model used for reasoning"
+    },
+    "reasoning_summary": {
+      "type": "string",
+      "maxLength": 500,
+      "description": "Human-readable explanation of the decision"
+    },
+    "entry_price": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Proposed entry price"
+    },
+    "stop_loss": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Stop loss price level"
+    },
+    "take_profit_levels": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "required": ["price", "quantity_pct"],
+        "properties": {
+          "price": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Take profit price level"
+          },
+          "quantity_pct": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Percentage of position to close at this level"
+          }
+        }
+      },
+      "description": "Take profit levels with partial exit percentages"
+    },
+    "position_size_usdt": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Requested position size in USDT (subject to Risk Manager approval)"
+    },
+    "leverage": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 20,
+      "description": "Requested leverage (subject to Risk Manager adjustment)"
+    },
+    "technical_signals": {
+      "type": "object",
+      "properties": {
+        "ema_alignment": {
+          "type": "string",
+          "enum": ["bullish", "bearish", "neutral"]
+        },
+        "rsi_condition": {
+          "type": "string",
+          "enum": ["oversold", "neutral", "overbought"]
+        },
+        "macd_signal": {
+          "type": "string",
+          "enum": ["bullish_cross", "bearish_cross", "neutral"]
+        },
+        "volume_confirmation": {
+          "type": "boolean"
+        },
+        "orderbook_pressure": {
+          "type": "string",
+          "enum": ["buy_pressure", "sell_pressure", "neutral"]
+        }
+      },
+      "description": "Technical indicator signals supporting the decision"
+    },
+    "risk_metrics": {
+      "type": "object",
+      "properties": {
+        "risk_reward_ratio": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Expected reward divided by risk"
+        },
+        "win_probability": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Estimated probability of profitable trade"
+        },
+        "max_adverse_excursion_pct": {
+          "type": "number",
+          "description": "Expected maximum drawdown during trade"
+        }
+      }
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When this decision was made"
+    },
+    "research_summary_hash": {
+      "type": "string",
+      "description": "SHA-256 hash of the research summary input (for audit trail)"
+    }
+  }
+}

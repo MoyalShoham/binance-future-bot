@@ -1,0 +1,229 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://trading-system/schemas/execution_result.schema.json",
+  "title": "Execution Result Schema",
+  "description": "Execution Agent order execution result",
+  "type": "object",
+  "required": [
+    "execution_id",
+    "approval_id",
+    "decision_id",
+    "execution_mode",
+    "execution_status",
+    "timestamp"
+  ],
+  "properties": {
+    "execution_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier for this execution"
+    },
+    "approval_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Reference to risk approval"
+    },
+    "decision_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Reference to trading decision"
+    },
+    "execution_mode": {
+      "type": "string",
+      "enum": ["PAPER", "LIVE", "HYBRID"],
+      "description": "Execution mode used"
+    },
+    "execution_status": {
+      "type": "string",
+      "enum": ["FILLED", "PARTIALLY_FILLED", "REJECTED", "FAILED", "CANCELLED"],
+      "description": "Final execution status"
+    },
+    "symbol": {
+      "type": "string",
+      "pattern": "^[A-Z]+USDT$"
+    },
+    "side": {
+      "type": "string",
+      "enum": ["LONG", "SHORT"]
+    },
+    "order_details": {
+      "type": "object",
+      "properties": {
+        "binance_order_id": {
+          "type": "string",
+          "description": "Binance API order ID (null for paper trading)"
+        },
+        "client_order_id": {
+          "type": "string",
+          "description": "Client-generated idempotent order ID"
+        },
+        "order_type": {
+          "type": "string",
+          "enum": ["MARKET", "LIMIT", "STOP_MARKET", "STOP_LIMIT"]
+        },
+        "requested_quantity": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Requested quantity in base asset"
+        },
+        "filled_quantity": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Actually filled quantity"
+        },
+        "avg_fill_price": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Average fill price"
+        },
+        "requested_price": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Requested entry price"
+        },
+        "slippage_usdt": {
+          "type": "number",
+          "description": "Slippage in USDT (positive = worse than expected)"
+        },
+        "slippage_bps": {
+          "type": "number",
+          "description": "Slippage in basis points"
+        },
+        "fees_usdt": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Trading fees in USDT"
+        },
+        "leverage": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "position_value_usdt": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Total position value in USDT"
+        }
+      }
+    },
+    "stop_loss_order": {
+      "type": "object",
+      "properties": {
+        "binance_order_id": {"type": "string"},
+        "stop_price": {"type": "number", "minimum": 0},
+        "status": {
+          "type": "string",
+          "enum": ["PLACED", "FAILED", "SKIPPED"]
+        }
+      },
+      "description": "Stop loss order details (if placed)"
+    },
+    "take_profit_orders": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "binance_order_id": {"type": "string"},
+          "price": {"type": "number", "minimum": 0},
+          "quantity_pct": {"type": "number", "minimum": 0, "maximum": 1},
+          "status": {
+            "type": "string",
+            "enum": ["PLACED", "FAILED", "SKIPPED"]
+          }
+        }
+      },
+      "description": "Take profit orders (if placed)"
+    },
+    "shadow_paper_execution": {
+      "type": "object",
+      "description": "Shadow paper execution for comparison (LIVE and HYBRID modes)",
+      "properties": {
+        "shadow_fill_price": {
+          "type": "number",
+          "minimum": 0
+        },
+        "shadow_slippage_usdt": {
+          "type": "number"
+        },
+        "divergence_usdt": {
+          "type": "number",
+          "description": "Difference between live and shadow execution"
+        },
+        "divergence_pct": {
+          "type": "number",
+          "description": "Percentage divergence"
+        },
+        "divergence_alert": {
+          "type": "boolean",
+          "description": "True if divergence exceeds threshold (0.5%)"
+        }
+      }
+    },
+    "paper_trading_simulation": {
+      "type": "object",
+      "description": "Paper trading simulation details (PAPER mode)",
+      "properties": {
+        "simulated_slippage_bps": {
+          "type": "number",
+          "description": "Simulated slippage in basis points"
+        },
+        "simulated_fees_usdt": {
+          "type": "number",
+          "minimum": 0
+        },
+        "market_impact_model": {
+          "type": "string",
+          "enum": ["linear", "square_root", "custom"]
+        }
+      }
+    },
+    "execution_timeline": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "timestamp": {"type": "string", "format": "date-time"},
+          "event": {"type": "string"},
+          "details": {"type": "string"}
+        }
+      },
+      "description": "Detailed execution timeline"
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "error_code": {"type": "string"},
+          "error_message": {"type": "string"},
+          "retry_count": {"type": "integer", "minimum": 0},
+          "timestamp": {"type": "string", "format": "date-time"}
+        }
+      },
+      "description": "Errors encountered during execution"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Execution completion timestamp"
+    },
+    "processing_time_ms": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Total execution time"
+    },
+    "idempotency_check": {
+      "type": "object",
+      "properties": {
+        "is_duplicate": {
+          "type": "boolean",
+          "description": "Whether this was a duplicate submission"
+        },
+        "original_execution_id": {
+          "type": "string",
+          "description": "Reference to original execution if duplicate"
+        }
+      }
+    }
+  }
+}
