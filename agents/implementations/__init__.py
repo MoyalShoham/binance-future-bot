@@ -9,9 +9,9 @@ from .research_coordinator import ResearchCoordinatorAgent
 from .trading_decision import TradingDecisionAgent
 from .risk_manager import RiskManagerAgent
 from .storage_reporter import StorageReporterAgent
+from .execution_agent import ExecutionAgent
 
 # TODO: Import other agents when implemented
-# from .execution_agent import ExecutionAgent
 # from .emergency_controller import EmergencyControllerAgent
 
 __all__ = [
@@ -23,4 +23,5 @@ __all__ = [
     "TradingDecisionAgent",
     "RiskManagerAgent",
     "StorageReporterAgent",
+    "ExecutionAgent",
 ]
