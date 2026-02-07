@@ -20,6 +20,7 @@ from agents.implementations import (
     RiskManagerAgent,
     StorageReporterAgent,
     ExecutionAgent,
+    EmergencyControllerAgent,
 )
 from infrastructure.binance_api import BinanceFuturesClient
 from infrastructure.database import init_database
@@ -127,8 +128,7 @@ def initialize_agents(config: dict, binance_client: BinanceFuturesClient, db_ses
         "risk_manager": RiskManagerAgent("risk-manager", config, binance_client, db_session),
         "execution_agent": ExecutionAgent("execution-agent", config, binance_client, db_session),
         "storage_reporter": StorageReporterAgent("storage-reporter", config, db_session),
-        # TODO: Implement Emergency Controller
-        # "emergency_controller": EmergencyControllerAgent("emergency-controller", config)
+        "emergency_controller": EmergencyControllerAgent("emergency-controller", config, binance_client, db_session),
     }
 
     logger.info("Agents initialized", agent_count=len(agents))

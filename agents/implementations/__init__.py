@@ -10,9 +10,7 @@ from .trading_decision import TradingDecisionAgent
 from .risk_manager import RiskManagerAgent
 from .storage_reporter import StorageReporterAgent
 from .execution_agent import ExecutionAgent
-
-# TODO: Import other agents when implemented
-# from .emergency_controller import EmergencyControllerAgent
+from .emergency_controller import EmergencyControllerAgent
 
 __all__ = [
     # Base
@@ -24,4 +22,5 @@ __all__ = [
     "RiskManagerAgent",
     "StorageReporterAgent",
     "ExecutionAgent",
+    "EmergencyControllerAgent",
 ]
