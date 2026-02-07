@@ -1,0 +1,182 @@
+{
+  "$schema": "https://claude.ai/hooks-schema-v1.json",
+  "version": "1.0.0",
+  "description": "Hook configuration for trading system automation and safety checks",
+
+  "hooks": {
+    "pre_tool_use": [
+      {
+        "name": "pre_trade_validation",
+        "description": "Validates all conditions before trade execution",
+        "enabled": true,
+        "tool_filters": ["execution-agent"],
+        "script": "hooks/scripts/pre_trade_validation.py",
+        "timeout_ms": 5000,
+        "blocking": true,
+        "critical": true
+      }
+    ],
+
+    "post_tool_use": [
+      {
+        "name": "post_execution_audit",
+        "description": "Logs execution details and updates P&L tracking",
+        "enabled": true,
+        "tool_filters": ["execution-agent"],
+        "script": "hooks/scripts/post_execution_audit.py",
+        "timeout_ms": 3000,
+        "blocking": false,
+        "critical": false
+      },
+      {
+        "name": "execution_quality_check",
+        "description": "Alerts on abnormal slippage or execution quality issues",
+        "enabled": true,
+        "tool_filters": ["execution-agent"],
+        "script": "hooks/scripts/execution_quality_check.py",
+        "timeout_ms": 2000,
+        "blocking": false,
+        "critical": false
+      }
+    ],
+
+    "continuous": [
+      {
+        "name": "risk_threshold_monitor",
+        "description": "Continuously monitors risk thresholds and triggers emergency stops",
+        "enabled": true,
+        "script": "hooks/scripts/risk_threshold_check.py",
+        "interval_seconds": 60,
+        "timeout_ms": 10000,
+        "critical": true
+      },
+      {
+        "name": "api_health_monitor",
+        "description": "Monitors Binance API connectivity and WebSocket status",
+        "enabled": true,
+        "script": "hooks/scripts/api_health_monitor.py",
+        "interval_seconds": 30,
+        "timeout_ms": 5000,
+        "critical": true
+      },
+      {
+        "name": "model_availability_check",
+        "description": "Checks AI model API availability",
+        "enabled": true,
+        "script": "hooks/scripts/model_availability_check.py",
+        "interval_seconds": 120,
+        "timeout_ms": 5000,
+        "critical": false
+      }
+    ],
+
+    "session_start": [
+      {
+        "name": "system_initialization",
+        "description": "Initialize database, load configuration, verify API keys",
+        "enabled": true,
+        "script": "hooks/scripts/system_initialization.py",
+        "timeout_ms": 30000,
+        "blocking": true,
+        "critical": true
+      }
+    ],
+
+    "session_end": [
+      {
+        "name": "daily_report_trigger",
+        "description": "Generate end-of-day trading report",
+        "enabled": true,
+        "script": "hooks/scripts/daily_report_trigger.py",
+        "timeout_ms": 60000,
+        "blocking": false,
+        "critical": false
+      },
+      {
+        "name": "position_summary",
+        "description": "Log summary of open positions at session end",
+        "enabled": true,
+        "script": "hooks/scripts/position_summary.py",
+        "timeout_ms": 10000,
+        "blocking": false,
+        "critical": false
+      }
+    ],
+
+    "emergency": [
+      {
+        "name": "emergency_circuit_breaker",
+        "description": "Triggered on flash crashes, API failures, or critical errors",
+        "enabled": true,
+        "script": "hooks/scripts/emergency_circuit_breaker.py",
+        "timeout_ms": 5000,
+        "blocking": true,
+        "critical": true,
+        "triggers": [
+          "price_move_gt_10pct_1min",
+          "api_connection_lost",
+          "daily_drawdown_exceeded",
+          "system_error_critical"
+        ]
+      },
+      {
+        "name": "emergency_notification",
+        "description": "Send alerts via configured notification channels",
+        "enabled": true,
+        "script": "hooks/scripts/emergency_notification.py",
+        "timeout_ms": 3000,
+        "blocking": false,
+        "critical": false
+      }
+    ]
+  },
+
+  "validation_rules": {
+    "pre_trade_validation": {
+      "checks": [
+        "risk_manager_approval_exists",
+        "sufficient_balance",
+        "execution_mode_valid",
+        "no_duplicate_order",
+        "kill_switch_disabled",
+        "api_connection_healthy"
+      ],
+      "fail_action": "abort_execution"
+    },
+    "risk_threshold_monitor": {
+      "thresholds": {
+        "max_daily_drawdown_pct": 0.05,
+        "max_portfolio_exposure_pct": 0.70,
+        "max_open_positions": 10,
+        "max_position_age_hours": 24
+      },
+      "alert_action": "trigger_emergency_hook"
+    }
+  },
+
+  "notification_config": {
+    "channels": {
+      "console": {
+        "enabled": true,
+        "severity_filter": ["critical", "error", "warning"]
+      },
+      "log_file": {
+        "enabled": true,
+        "path": "logs/trading_alerts.log",
+        "severity_filter": ["critical", "error", "warning", "info"]
+      },
+      "email": {
+        "enabled": false,
+        "smtp_server": "smtp.example.com",
+        "from_address": "trading-system@example.com",
+        "to_addresses": ["admin@example.com"],
+        "severity_filter": ["critical", "error"]
+      },
+      "webhook": {
+        "enabled": false,
+        "url": "https://hooks.slack.com/services/YOUR/WEBHOOK/URL",
+        "severity_filter": ["critical", "error"]
+      }
+    }
+  }
+}

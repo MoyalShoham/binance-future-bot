@@ -1,0 +1,218 @@
+# Trading System Configuration
+
+# Execution Settings
+trading:
+  enabled: true
+  execution_mode: "paper"  # paper | live | hybrid
+  max_concurrent_positions: 5
+  default_leverage: 5
+
+  # Scalping configuration
+  scalping:
+    enabled: true
+    min_profit_target_pct: 0.003  # 0.3% minimum profit target
+    max_holding_time_seconds: 600  # 10 minutes max
+    timeframes: ["1m", "5m", "15m"]
+
+  # Supported symbols
+  symbols:
+    - "BTCUSDT"
+    - "ETHUSDT"
+    - "BNBUSDT"
+    - "SOLUSDT"
+
+# Risk Management
+risk:
+  # Position sizing limits
+  max_risk_per_trade_pct: 0.02  # 2% of account per trade
+  max_daily_drawdown_pct: 0.05  # 5% daily drawdown limit
+  max_portfolio_exposure_pct: 0.70  # 70% max capital deployed
+  max_position_concentration_pct: 0.30  # Single position max 30%
+
+  # Leverage limits (volatility-adjusted)
+  leverage_limits:
+    low_volatility: 10    # < 2% volatility
+    medium_volatility: 7  # 2-5% volatility
+    high_volatility: 5    # > 5% volatility
+
+  # Correlation limits
+  max_correlated_positions: 3  # Max positions with correlation > 0.7
+
+  # Volatility gate
+  volatility_gate_threshold_pct: 0.05  # Block trades if volatility > 5%
+
+  # Position sizing method
+  position_sizing:
+    method: "kelly_criterion"  # kelly_criterion | fixed_percentage | atr_based
+    kelly_fraction: 0.5  # Half Kelly for safety
+    atr_multiplier: 2.0  # For ATR-based stop loss
+
+  # Kill switches
+  kill_switches:
+    global: false  # Master kill switch
+    symbols: {}    # Symbol-specific: {"BTCUSDT": true}
+    strategies: {}  # Strategy-specific: {"ema_crossover_scalp": true}
+    volatility_circuit_breaker:
+      enabled: true
+      trigger_pct: 0.10  # 10% move in 1 minute
+      cooldown_seconds: 300  # 5 minutes
+
+# Model Routing
+models:
+  routing_strategy: "cheap_first"  # Route to cheapest model first
+
+  # Confidence thresholds for escalation
+  confidence_thresholds:
+    research: 0.70
+    decision: 0.75
+    risk: 0.80
+    emergency: 0.90
+
+  # Model hierarchy (cost: low to high)
+  model_hierarchy:
+    - name: "gpt-4o-nano"
+      cost: 0.00015
+      use_for: ["classification", "simple_reasoning"]
+
+    - name: "gemini-1.5-flash"
+      cost: 0.000075
+      use_for: ["pattern_matching", "sentiment_analysis"]
+
+    - name: "claude-3.5-haiku"
+      cost: 0.0008
+      use_for: ["risk_reasoning", "complex_decisions"]
+
+    - name: "claude-3.7-sonnet"
+      cost: 0.003
+      use_for: ["critical_decisions", "anomaly_detection"]
+
+# Execution Configuration
+execution:
+  # Paper trading settings
+  paper_trading:
+    enabled: true
+    base_slippage_bps: 5  # 5 basis points base slippage
+    market_impact_model: "square_root"  # linear | square_root | custom
+
+  # Fees
+  fees:
+    maker_bps: 2  # 0.02% maker fee
+    taker_bps: 5  # 0.05% taker fee
+
+  # Hybrid mode settings
+  hybrid:
+    divergence_threshold_pct: 0.005  # Alert if >0.5% divergence
+    alert_on_divergence: true
+
+  # Order retry configuration
+  retry:
+    max_attempts: 3
+    backoff_seconds: 2
+    exponential_backoff: true
+
+# Data & Storage
+data:
+  # Database
+  database:
+    type: "sqlite"  # sqlite | postgresql
+    path: "data/trading_system.db"
+    # For PostgreSQL:
+    # host: "localhost"
+    # port: 5432
+    # database: "trading_system"
+    # user: "trading_user"
+    # password: "${POSTGRES_PASSWORD}"  # From environment
+
+  # Audit trail
+  audit:
+    enabled: true
+    hash_chain: true  # Use SHA-256 hash chaining
+    immutable: true
+    retention_days: 365
+
+  # Backups
+  backups:
+    enabled: true
+    frequency: "daily"
+    retention_count: 30
+    path: "backups/"
+
+# Reporting
+reporting:
+  # Daily reports
+  daily:
+    enabled: true
+    time_utc: "00:00"  # Generate at midnight UTC
+    export_formats: ["json", "csv", "markdown"]
+    include_charts: false
+
+  # Performance metrics
+  metrics:
+    - "total_trades"
+    - "win_rate"
+    - "profit_loss"
+    - "sharpe_ratio"
+    - "max_drawdown"
+    - "avg_holding_time"
+    - "strategy_breakdown"
+    - "model_accuracy"
+
+# Strategies
+strategies:
+  enabled:
+    - "ema_crossover_scalp"
+    - "vwap_bounce_scalp"
+    - "orderbook_imbalance_scalp"
+    - "momentum_breakout_scalp"
+
+  # Strategy-specific parameters
+  ema_crossover_scalp:
+    timeframe: "5m"
+    fast_ema: 9
+    slow_ema: 21
+    expected_holding_time_seconds: 180
+
+  vwap_bounce_scalp:
+    timeframe: "1m"
+    deviation_bands: 2.0  # Standard deviations
+    expected_holding_time_seconds: 120
+
+  orderbook_imbalance_scalp:
+    timeframe: "1m"
+    imbalance_threshold: 0.3  # 30% imbalance required
+    expected_holding_time_seconds: 90
+
+  momentum_breakout_scalp:
+    timeframe: "5m"
+    volume_multiplier: 1.5  # 1.5x average volume required
+    expected_holding_time_seconds: 240
+
+# Monitoring & Alerts
+monitoring:
+  # API health
+  api_health:
+    check_interval_seconds: 30
+    timeout_seconds: 10
+
+  # Risk monitoring
+  risk_monitoring:
+    check_interval_seconds: 60
+    alert_channels: ["console", "log_file"]
+
+  # Performance tracking
+  performance:
+    track_model_usage: true
+    track_execution_quality: true
+    track_strategy_performance: true
+
+# Logging
+logging:
+  level: "INFO"  # DEBUG | INFO | WARNING | ERROR | CRITICAL
+  format: "json"  # json | text
+  outputs:
+    console: true
+    file: true
+    file_path: "logs/trading_system.log"
+  rotation:
+    max_size_mb: 100
+    backup_count: 10

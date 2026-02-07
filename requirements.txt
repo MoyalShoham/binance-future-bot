@@ -1,0 +1,60 @@
+# Core Dependencies
+python-binance==1.0.19          # Binance API wrapper
+ccxt==4.2.25                     # Alternative exchange interface
+
+# LangChain & AI Models
+langchain==0.1.6
+langchain-openai==0.0.5
+langchain-anthropic==0.1.4
+langchain-google-genai==0.0.7
+langgraph==0.0.20
+
+# Data Processing
+pandas==2.2.0
+numpy==1.26.3
+ta==0.11.0                       # Technical analysis indicators
+python-dotenv==1.0.0
+
+# JSON Schema Validation
+jsonschema==4.21.1
+
+# Database
+sqlalchemy==2.0.25
+alembic==1.13.1                  # Database migrations
+
+# API & Networking
+requests==2.31.0
+aiohttp==3.9.3
+websockets==12.0
+
+# Configuration
+pyyaml==6.0.1
+pydantic==2.5.3
+pydantic-settings==2.1.0
+
+# Testing
+pytest==7.4.4
+pytest-asyncio==0.23.3
+pytest-cov==4.1.0
+pytest-mock==3.12.0
+
+# Logging & Monitoring
+structlog==24.1.0
+colorlog==6.8.2
+
+# Utilities
+click==8.1.7                     # CLI framework
+rich==13.7.0                     # Terminal formatting
+tenacity==8.2.3                  # Retry logic
+python-dateutil==2.8.2
+
+# Security
+cryptography==42.0.0
+
+# GPU Fine-Tuning (Optional - for extensions)
+# torch==2.2.0+cu118              # Uncomment for GPU training
+# transformers==4.37.2
+# peft==0.8.2                     # LoRA/QLoRA
+# bitsandbytes==0.42.0            # Quantization
+# accelerate==0.26.1
+# datasets==2.16.1
