@@ -16,6 +16,7 @@ from orchestration import TradingCoordinator, StateManager, ModelRouter
 from orchestration.state_manager import ExecutionMode
 from agents.implementations import (
     ResearchCoordinatorAgent,
+    TradingDecisionAgent,
     RiskManagerAgent,
     StorageReporterAgent,
 )
@@ -121,9 +122,9 @@ def initialize_agents(config: dict, binance_client: BinanceFuturesClient, db_ses
     """
     agents = {
         "research_coordinator": ResearchCoordinatorAgent("research-coordinator", config, binance_client),
-        # TODO: Implement remaining agents
-        # "trading_decision": TradingDecisionAgent("trading-decision", config),
+        "trading_decision": TradingDecisionAgent("trading-decision", config),
         "risk_manager": RiskManagerAgent("risk-manager", config, binance_client, db_session),
+        # TODO: Implement remaining agents
         # "execution_agent": ExecutionAgent("execution-agent", config),
         "storage_reporter": StorageReporterAgent("storage-reporter", config, db_session),
         # "emergency_controller": EmergencyControllerAgent("emergency-controller", config)
