@@ -849,15 +849,42 @@ class RiskManagerAgent(BaseAgent):
 
         except Exception as e:
             logger.error("Failed to get account status", error=str(e))
-            # FAIL SAFE: Return conservative defaults
+
+            # For paper trading, use simulated balance from config
+            paper_config = self.config.get("execution", {}).get("paper_trading", {})
+            simulated_balance = paper_config.get("simulated_balance_usdt", 0)
+
+            # Get open positions from database for exposure calculation
+            try:
+                with self.db_session.session_scope() as session:
+                    self.queries.session = session
+                    open_positions = self.queries.get_open_positions()
+                    current_exposure = sum(
+                        pos.entry_price * pos.quantity * pos.leverage
+                        for pos in open_positions
+                    )
+                    today_start = datetime.combine(datetime.today(), datetime.min.time())
+                    today_end = datetime.now()
+                    daily_pnl = self.queries.calculate_total_pnl(today_start, today_end)
+            except Exception as db_error:
+                logger.warning("Failed to get position data from database", error=str(db_error))
+                current_exposure = 0
+                daily_pnl = 0
+                open_positions = []
+
+            # Calculate total equity (simulated balance + unrealized P&L)
+            total_equity = simulated_balance + daily_pnl
+            available_balance = total_equity - current_exposure
+
+            # FAIL SAFE: Return simulated paper trading defaults or conservative values
             return {
-                "available_balance": 0,
-                "total_equity": 1,
-                "current_exposure": 0,
+                "available_balance": max(0, available_balance) if simulated_balance > 0 else 0,
+                "total_equity": max(1, total_equity) if simulated_balance > 0 else 1,
+                "current_exposure": current_exposure,
                 "unrealized_pnl": 0,
-                "daily_pnl": 0,
-                "daily_drawdown_pct": 0,
-                "open_positions_count": 0
+                "daily_pnl": daily_pnl,
+                "daily_drawdown_pct": daily_pnl / total_equity if total_equity > 0 else 0,
+                "open_positions_count": len(open_positions)
             }
 
     # ========== RESPONSE BUILDERS ==========
