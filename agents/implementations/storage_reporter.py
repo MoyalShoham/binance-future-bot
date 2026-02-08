@@ -305,6 +305,9 @@ class StorageReporterAgent(BaseAgent):
     ):
         """Store audit trail entry with hash chain."""
 
+        # Serialize event_data to handle datetime objects
+        serialized_event_data = self._serialize_for_json(event_data)
+
         # Compute input hash
         input_hash = self._compute_hash(event_data)
 
@@ -323,7 +326,7 @@ class StorageReporterAgent(BaseAgent):
             correlation_id=correlation_id,
             agent_id=self.agent_id,
             event_type=event_type,
-            event_data=event_data,
+            event_data=serialized_event_data,
             input_hash=input_hash,
             previous_hash=previous_hash,
             current_hash=current_hash,
@@ -343,6 +346,10 @@ class StorageReporterAgent(BaseAgent):
         """Compute SHA-256 hash of data."""
         json_str = json.dumps(data, sort_keys=True, default=str)
         return hashlib.sha256(json_str.encode()).hexdigest()
+
+    def _serialize_for_json(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Serialize data to be JSON-compatible (convert datetime objects to ISO strings)."""
+        return json.loads(json.dumps(data, default=str))
 
     # ========== Reporting Methods ==========
 
