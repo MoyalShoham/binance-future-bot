@@ -61,7 +61,7 @@
     },
     "symbol": {
       "type": "string",
-      "pattern": "^[A-Z]+USDT$",
+      "pattern": "^[A-Z0-9]+USDT$",
       "description": "Trading pair symbol"
     },
     "side": {

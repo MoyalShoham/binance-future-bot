@@ -502,21 +502,24 @@ class TradingDecisionAgent(BaseAgent):
         """
         Estimate initial position size (Risk Manager will validate/adjust).
 
-        Uses simplified 2% risk per trade assumption.
+        Uses configured balance and risk per trade.
         """
-        # Assume $10,000 account (will be validated by Risk Manager)
-        assumed_equity = 10000.0
+        # Use simulated balance from config
+        assumed_equity = self.config.get("execution", {}).get(
+            "paper_trading", {}
+        ).get("simulated_balance_usdt", 100)
 
-        # Risk 2% per trade
-        risk_amount = assumed_equity * 0.02
+        # Risk per trade from config
+        risk_pct = self.config.get("risk", {}).get("max_risk_per_trade_pct", 0.10)
+        risk_amount = assumed_equity * risk_pct
 
-        # Calculate position size
+        # Calculate position size based on stop distance
         stop_distance_pct = abs((entry_price - stop_loss) / entry_price)
 
         if stop_distance_pct > 0:
             position_size = risk_amount / stop_distance_pct
         else:
-            position_size = 1000.0  # Default fallback
+            position_size = assumed_equity * 0.5  # Default: 50% of equity
 
         return round(position_size, 2)
 

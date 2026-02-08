@@ -4,9 +4,9 @@
 trading:
   enabled: true
   execution_mode: "paper"  # paper | live | hybrid
-  testnet: false  # Use Binance mainnet for market data (paper mode = no real orders)
-  max_concurrent_positions: 5
-  default_leverage: 5
+  testnet: false  # Use Binance mainnet for market data
+  max_concurrent_positions: 3
+  default_leverage: 10
 
   # Scalping configuration
   scalping:
@@ -15,26 +15,30 @@ trading:
     max_holding_time_seconds: 600  # 10 minutes max
     timeframes: ["1m", "5m", "15m"]
 
-  # Supported symbols
+  # Supported symbols (small-cap coins with low minimum order sizes)
   symbols:
-    - "BTCUSDT"
-    - "ETHUSDT"
-    - "BNBUSDT"
-    - "SOLUSDT"
+    - "XRPUSDT"
+    - "LINKUSDT"
+    - "DOGEUSDT"
+    - "1000SHIBUSDT"
+    - "1000FLOKIUSDT"
+    - "ADAUSDT"
+    - "DOTUSDT"
+    - "AVAXUSDT"
 
 # Risk Management
 risk:
-  # Position sizing limits
-  max_risk_per_trade_pct: 0.02  # 2% of account per trade
-  max_daily_drawdown_pct: 0.05  # 5% daily drawdown limit
-  max_portfolio_exposure_pct: 0.70  # 70% max capital deployed
-  max_position_concentration_pct: 0.30  # Single position max 30%
+  # Position sizing limits (adjusted for small $6 account)
+  max_risk_per_trade_pct: 0.10  # 10% of account per trade ($0.60 risk per trade)
+  max_daily_drawdown_pct: 0.20  # 20% daily drawdown limit ($1.20 max daily loss)
+  max_portfolio_exposure_pct: 0.90  # 90% max capital deployed
+  max_position_concentration_pct: 0.50  # Single position max 50%
 
-  # Leverage limits (volatility-adjusted)
+  # Leverage limits (higher for small account)
   leverage_limits:
-    low_volatility: 10    # < 2% volatility
-    medium_volatility: 7  # 2-5% volatility
-    high_volatility: 5    # > 5% volatility
+    low_volatility: 20    # < 2% volatility
+    medium_volatility: 15  # 2-5% volatility
+    high_volatility: 10    # > 5% volatility
 
   # Correlation limits
   max_correlated_positions: 3  # Max positions with correlation > 0.7
@@ -92,7 +96,7 @@ execution:
   # Paper trading settings
   paper_trading:
     enabled: true
-    simulated_balance_usdt: 1000000  # Simulated starting balance for paper trading (1M USDT for continuous trading)
+    simulated_balance_usdt: 6  # Match real portfolio size for realistic paper testing
     base_slippage_bps: 5  # 5 basis points base slippage
     market_impact_model: "square_root"  # linear | square_root | custom
 

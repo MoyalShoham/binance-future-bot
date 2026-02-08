@@ -40,8 +40,8 @@
     },
     "symbol": {
       "type": "string",
-      "pattern": "^[A-Z]+USDT$",
-      "description": "Trading pair symbol (e.g., BTCUSDT)"
+      "pattern": "^[A-Z0-9]+USDT$",
+      "description": "Trading pair symbol (e.g., BTCUSDT, 1000SHIBUSDT)"
     },
     "timeframe": {
       "type": "string",

@@ -197,8 +197,8 @@ def main():
     parser.add_argument(
         "--symbol",
         type=str,
-        default="BTCUSDT",
-        help="Trading symbol (default: BTCUSDT)"
+        default="XRPUSDT",
+        help="Trading symbol (default: XRPUSDT)"
     )
     parser.add_argument(
         "--config",
