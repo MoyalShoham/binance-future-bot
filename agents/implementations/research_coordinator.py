@@ -13,7 +13,6 @@ import structlog
 from .base_agent import BaseAgent
 from infrastructure.binance_api import BinanceFuturesClient
 from infrastructure.binance_api.indicators import TechnicalIndicators
-from infrastructure.binance_api.market_data import fetch_complete_market_data
 from schemas.validator import SchemaValidator
 
 logger = structlog.get_logger()
