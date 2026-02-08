@@ -7,6 +7,7 @@ Initializes all agents and runs the trading coordinator.
 import os
 import sys
 import argparse
+import logging
 from datetime import datetime
 from dotenv import load_dotenv
 import yaml
@@ -24,6 +25,9 @@ from agents.implementations import (
 )
 from infrastructure.binance_api import BinanceFuturesClient
 from infrastructure.database import init_database
+
+# Set root logging level to INFO so structlog filter_by_level works correctly
+logging.basicConfig(format="%(message)s", stream=sys.stderr, level=logging.INFO)
 
 # Configure structured logging
 structlog.configure(
