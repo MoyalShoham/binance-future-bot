@@ -48,7 +48,8 @@ class EmergencyControllerAgent(BaseAgent):
         agent_id: str,
         config: Dict[str, Any],
         binance_client,
-        db_session=None
+        db_session=None,
+        model_router=None
     ):
         """
         Initialize Emergency Controller Agent.
@@ -58,8 +59,9 @@ class EmergencyControllerAgent(BaseAgent):
             config: System configuration
             binance_client: Binance API client
             db_session: Database session (optional)
+            model_router: Optional ModelRouter for LLM enhancement
         """
-        super().__init__(agent_id, config)
+        super().__init__(agent_id, config, model_router=model_router)
 
         self.binance_client = binance_client
         self.db_session = db_session
@@ -118,6 +120,20 @@ class EmergencyControllerAgent(BaseAgent):
                 "monitoring_active": self.monitoring_active
             }
 
+            # LLM risk assessment (advisory only - CANNOT activate kill switches)
+            llm_assessment = self._get_risk_assessment(
+                api_health, db_health, model_apis, anomalies_detected, kill_switch_status
+            )
+            if llm_assessment:
+                status["llm_risk_assessment"] = llm_assessment
+                risk_level = llm_assessment.get("risk_level", "safe")
+                if risk_level in ("danger", "critical"):
+                    logger.warning(
+                        "LLM risk assessment elevated",
+                        risk_level=risk_level,
+                        reasoning=llm_assessment.get("reasoning", ""),
+                    )
+
             logger.info("Emergency Controller check completed", status=status)
 
             return status
@@ -125,6 +141,56 @@ class EmergencyControllerAgent(BaseAgent):
         except Exception as e:
             logger.error("Emergency Controller check failed", error=str(e), exc_info=True)
             raise
+
+    # ========== LLM ENHANCEMENT ==========
+
+    def _get_risk_assessment(
+        self,
+        api_health: Dict[str, Any],
+        db_health: bool,
+        model_apis: Dict[str, bool],
+        anomalies_detected: List[str],
+        kill_switch_status: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Call LLM for advisory risk assessment.
+
+        SAFETY: LLM output is logged/stored but CANNOT auto-activate kill switches.
+
+        Returns parsed LLM response or None if LLM unavailable/disabled.
+        """
+        from orchestration.model_router import TaskType
+        from prompts.base import build_prompt
+        from prompts.emergency_controller import EMERGENCY_CONTROLLER_SYSTEM
+
+        context_data = {
+            "api_health": api_health,
+            "db_health": db_health,
+            "model_apis": model_apis,
+            "anomalies_detected": anomalies_detected,
+            "kill_switch_status": kill_switch_status,
+        }
+
+        system_prompt, user_prompt = build_prompt(EMERGENCY_CONTROLLER_SYSTEM, context_data)
+
+        result = self.call_llm(
+            task_type=TaskType.ANOMALY_DETECTION,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            context="emergency",
+            max_escalations=0,
+        )
+
+        if result and result.get("response"):
+            response = result["response"]
+            logger.info(
+                "LLM risk assessment completed",
+                model=result.get("model_used"),
+                risk_level=response.get("risk_level"),
+            )
+            return response
+
+        return None
 
     # ========== CONTINUOUS MONITORING ==========
 

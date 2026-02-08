@@ -1,13 +1,23 @@
 """
-Model Router - Cheap-Model-First Routing Strategy
+Model Router - Cheap-Model-First Routing Strategy with LLM Invocation
 
 Routes AI model requests based on task type and confidence thresholds.
 Escalates to more expensive models if confidence is too low.
+Actually invokes LLMs via LangChain ChatModel classes.
 """
 
-from typing import Dict, Any, Optional, List, Tuple
+import os
+import re
+import json
+from typing import Dict, Any, Optional, Tuple
 from enum import Enum
 import structlog
+
+from langchain_anthropic import ChatAnthropic
+from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import SystemMessage, HumanMessage
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 logger = structlog.get_logger()
 
@@ -26,10 +36,19 @@ class TaskType(str, Enum):
 
 class ModelTier(str, Enum):
     """Model tiers ordered by cost (low to high)."""
-    NANO = "gpt-4o-nano"
-    FLASH = "gemini-1.5-flash"
-    HAIKU = "claude-3.5-haiku"
-    SONNET = "claude-3.7-sonnet"
+    NANO = "gpt-4o-mini"
+    FLASH = "gemini-2.0-flash"
+    HAIKU = "claude-3-5-haiku-20241022"
+    SONNET = "claude-sonnet-4-20250514"
+
+
+# Map tier to provider for display
+TIER_PROVIDER = {
+    ModelTier.NANO: "openai",
+    ModelTier.FLASH: "google",
+    ModelTier.HAIKU: "anthropic",
+    ModelTier.SONNET: "anthropic",
+}
 
 
 class ModelRouter:
@@ -37,6 +56,7 @@ class ModelRouter:
     Routes AI requests to appropriate models based on task type and confidence.
 
     Implements cheap-model-first strategy with automatic escalation.
+    Actually invokes LLMs via LangChain and parses JSON responses.
     """
 
     # Model configuration: cost per 1K tokens (input)
@@ -44,7 +64,7 @@ class ModelRouter:
         ModelTier.NANO: 0.00015,
         ModelTier.FLASH: 0.000075,
         ModelTier.HAIKU: 0.0008,
-        ModelTier.SONNET: 0.003  # Highest tier
+        ModelTier.SONNET: 0.003
     }
 
     # Default model for each task type
@@ -76,17 +96,18 @@ class ModelRouter:
     }
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
-        """
-        Initialize model router.
-
-        Args:
-            config: Optional configuration overrides
-        """
         self.config = config or {}
         self.confidence_thresholds = self.config.get(
             "confidence_thresholds",
             self.DEFAULT_THRESHOLDS
         )
+        self.enabled = self.config.get("enabled", True)
+        self.primary_provider = self.config.get("primary_provider", "anthropic")
+
+        # Timeout settings
+        timeouts = self.config.get("timeouts", {})
+        self._haiku_timeout = timeouts.get("haiku_seconds", 15)
+        self._sonnet_timeout = timeouts.get("sonnet_seconds", 30)
 
         # Track model usage statistics
         self.usage_stats = {
@@ -94,7 +115,137 @@ class ModelRouter:
             for model in ModelTier
         }
 
-        logger.info("ModelRouter initialized", thresholds=self.confidence_thresholds)
+        # Cache model instances to avoid re-creating on every call
+        self._model_cache: Dict[ModelTier, Any] = {}
+
+        logger.info(
+            "ModelRouter initialized",
+            enabled=self.enabled,
+            primary_provider=self.primary_provider,
+            thresholds=self.confidence_thresholds
+        )
+
+    def _create_model(self, tier: ModelTier) -> Any:
+        """Create a LangChain ChatModel instance for the given tier."""
+        if tier in self._model_cache:
+            return self._model_cache[tier]
+
+        model = None
+        if tier == ModelTier.HAIKU:
+            api_key = os.getenv("ANTHROPIC_API_KEY")
+            if not api_key:
+                raise ValueError("ANTHROPIC_API_KEY not set")
+            model = ChatAnthropic(
+                model="claude-3-5-haiku-20241022",
+                api_key=api_key,
+                temperature=0.1,
+                max_tokens=2048,
+                timeout=self._haiku_timeout,
+            )
+        elif tier == ModelTier.SONNET:
+            api_key = os.getenv("ANTHROPIC_API_KEY")
+            if not api_key:
+                raise ValueError("ANTHROPIC_API_KEY not set")
+            model = ChatAnthropic(
+                model="claude-sonnet-4-20250514",
+                api_key=api_key,
+                temperature=0.2,
+                max_tokens=4096,
+                timeout=self._sonnet_timeout,
+            )
+        elif tier == ModelTier.NANO:
+            api_key = os.getenv("OPENAI_API_KEY")
+            if not api_key:
+                raise ValueError("OPENAI_API_KEY not set")
+            model = ChatOpenAI(
+                model="gpt-4o-mini",
+                api_key=api_key,
+                temperature=0.1,
+                max_tokens=2048,
+                timeout=15,
+            )
+        elif tier == ModelTier.FLASH:
+            api_key = os.getenv("GOOGLE_API_KEY")
+            if not api_key:
+                raise ValueError("GOOGLE_API_KEY not set")
+            model = ChatGoogleGenerativeAI(
+                model="gemini-2.0-flash",
+                google_api_key=api_key,
+                temperature=0.1,
+                max_output_tokens=2048,
+            )
+
+        if model is None:
+            raise ValueError(f"Unknown model tier: {tier}")
+
+        self._model_cache[tier] = model
+        return model
+
+    def _parse_json_response(self, content: str) -> Optional[Dict[str, Any]]:
+        """Parse JSON from LLM response, stripping markdown fences if present."""
+        text = content.strip()
+
+        # Strip markdown code fences
+        if text.startswith("```"):
+            # Remove opening fence (```json or ```)
+            text = re.sub(r'^```(?:json)?\s*\n?', '', text)
+            # Remove closing fence
+            text = re.sub(r'\n?```\s*$', '', text)
+            text = text.strip()
+
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            # Try to extract JSON object from the text
+            match = re.search(r'\{[\s\S]*\}', text)
+            if match:
+                try:
+                    return json.loads(match.group())
+                except json.JSONDecodeError:
+                    pass
+            logger.warning("Failed to parse JSON from LLM response", content=text[:200])
+            return None
+
+    def _invoke_model(
+        self,
+        tier: ModelTier,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> Dict[str, Any]:
+        """
+        Invoke a single model and return parsed result.
+
+        Returns dict with: response, model_used, tokens, raw_content
+        Raises on failure (caller handles retry/escalation).
+        """
+        model = self._create_model(tier)
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_prompt),
+        ]
+
+        result = model.invoke(messages)
+        raw_content = result.content if hasattr(result, 'content') else str(result)
+
+        # Extract token usage if available
+        tokens = 0
+        if hasattr(result, 'usage_metadata') and result.usage_metadata:
+            tokens = (
+                result.usage_metadata.get('input_tokens', 0)
+                + result.usage_metadata.get('output_tokens', 0)
+            )
+        elif hasattr(result, 'response_metadata'):
+            usage = result.response_metadata.get('usage', {})
+            tokens = usage.get('input_tokens', 0) + usage.get('output_tokens', 0)
+
+        parsed = self._parse_json_response(raw_content)
+
+        return {
+            "parsed": parsed,
+            "raw_content": raw_content,
+            "model_used": tier.value,
+            "tokens": tokens,
+        }
 
     def select_model(
         self,
@@ -102,32 +253,19 @@ class ModelRouter:
         context: str = "decision",
         force_model: Optional[ModelTier] = None
     ) -> ModelTier:
-        """
-        Select the appropriate model for a task.
-
-        Args:
-            task_type: Type of task to perform
-            context: Context for confidence threshold (research/decision/risk/emergency)
-            force_model: Optional model to force (overrides routing)
-
-        Returns:
-            Selected ModelTier
-        """
+        """Select the appropriate model for a task."""
         if force_model:
-            logger.info("Model forced by caller", model=force_model, task_type=task_type)
             return force_model
 
-        # Get default model for this task type
-        model = self.TASK_DEFAULT_MODELS.get(task_type, ModelTier.HAIKU)
+        # If primary is anthropic, bias towards Haiku for most tasks
+        if self.primary_provider == "anthropic":
+            # Override NANO/FLASH to HAIKU for anthropic-primary config
+            default = self.TASK_DEFAULT_MODELS.get(task_type, ModelTier.HAIKU)
+            if default in (ModelTier.NANO, ModelTier.FLASH):
+                return ModelTier.HAIKU
+            return default
 
-        logger.debug(
-            "Model selected",
-            task_type=task_type,
-            model=model,
-            context=context
-        )
-
-        return model
+        return self.TASK_DEFAULT_MODELS.get(task_type, ModelTier.HAIKU)
 
     def should_escalate(
         self,
@@ -135,93 +273,146 @@ class ModelRouter:
         confidence: float,
         context: str = "decision"
     ) -> Tuple[bool, Optional[ModelTier]]:
-        """
-        Determine if model escalation is needed based on confidence.
-
-        Args:
-            current_model: Current model that produced the result
-            confidence: Confidence score from the model (0-1)
-            context: Context for threshold lookup
-
-        Returns:
-            Tuple of (should_escalate, next_model)
-        """
+        """Determine if model escalation is needed based on confidence."""
         threshold = self.confidence_thresholds.get(context, 0.75)
 
         if confidence >= threshold:
-            # Confidence is acceptable
             return False, None
 
-        # Find next model in escalation chain
         try:
             current_idx = self.ESCALATION_CHAIN.index(current_model)
             if current_idx < len(self.ESCALATION_CHAIN) - 1:
                 next_model = self.ESCALATION_CHAIN[current_idx + 1]
                 logger.warning(
                     "Model escalation triggered",
-                    current_model=current_model,
-                    next_model=next_model,
+                    current_model=current_model.value,
+                    next_model=next_model.value,
                     confidence=confidence,
                     threshold=threshold,
                     context=context
                 )
                 return True, next_model
             else:
-                # Already at highest tier
                 logger.warning(
                     "Low confidence at highest model tier",
-                    model=current_model,
+                    model=current_model.value,
                     confidence=confidence,
                     threshold=threshold
                 )
                 return False, None
         except ValueError:
-            logger.error("Invalid model in escalation chain", model=current_model)
             return False, None
 
-    def route_with_escalation(
+    def invoke(
         self,
         task_type: TaskType,
-        prompt: str,
+        system_prompt: str,
+        user_prompt: str,
         context: str = "decision",
-        max_escalations: int = 2
+        max_escalations: int = 1,
     ) -> Dict[str, Any]:
         """
-        Route request with automatic escalation on low confidence.
-
-        This is a placeholder that returns routing instructions.
-        Actual model calls should be implemented by agents.
+        Invoke an LLM with automatic escalation on low confidence.
 
         Args:
-            task_type: Type of task
-            prompt: Prompt to send to model
-            context: Context for confidence threshold
+            task_type: Type of task for model selection
+            system_prompt: System prompt with agent role/instructions
+            user_prompt: User prompt with context data
+            context: Context for confidence threshold (research/decision/risk/emergency)
             max_escalations: Maximum number of escalation attempts
 
         Returns:
-            Dict with routing instructions
+            Dict with keys: response (parsed dict), model_used (str),
+            confidence (float), tokens (int), llm_available (bool)
         """
-        model = self.select_model(task_type, context)
+        if not self.enabled:
+            return {"llm_available": False, "error": "LLM disabled in config"}
 
-        routing_plan = {
-            "initial_model": model,
-            "task_type": task_type,
-            "context": context,
-            "confidence_threshold": self.confidence_thresholds[context],
-            "max_escalations": max_escalations,
-            "escalation_chain": []
-        }
+        current_tier = self.select_model(task_type, context)
+        escalation_count = 0
 
-        # Build escalation chain
-        current_idx = self.ESCALATION_CHAIN.index(model)
-        for i in range(max_escalations):
-            if current_idx + i + 1 < len(self.ESCALATION_CHAIN):
-                routing_plan["escalation_chain"].append(
-                    self.ESCALATION_CHAIN[current_idx + i + 1]
+        while True:
+            try:
+                result = self._invoke_with_retry(current_tier, system_prompt, user_prompt)
+
+                parsed = result["parsed"]
+                tokens = result["tokens"]
+
+                # Record usage
+                self.record_usage(current_tier, tokens, was_escalation=escalation_count > 0)
+
+                if parsed is None:
+                    logger.warning("LLM returned unparseable response", model=current_tier.value)
+                    return {
+                        "llm_available": True,
+                        "response": None,
+                        "model_used": current_tier.value,
+                        "confidence": 0.0,
+                        "tokens": tokens,
+                        "raw_content": result.get("raw_content", ""),
+                    }
+
+                # Extract confidence from response
+                confidence = parsed.get("confidence", 0.5)
+
+                # Check if escalation needed
+                if escalation_count < max_escalations:
+                    needs_escalation, next_tier = self.should_escalate(
+                        current_tier, confidence, context
+                    )
+                    if needs_escalation and next_tier:
+                        escalation_count += 1
+                        current_tier = next_tier
+                        continue
+
+                return {
+                    "llm_available": True,
+                    "response": parsed,
+                    "model_used": current_tier.value,
+                    "confidence": confidence,
+                    "tokens": tokens,
+                    "escalation_count": escalation_count,
+                }
+
+            except Exception as e:
+                logger.error(
+                    "LLM invocation failed",
+                    model=current_tier.value,
+                    error=str(e),
+                    task_type=task_type.value,
                 )
 
-        logger.info("Routing plan created", plan=routing_plan)
-        return routing_plan
+                # Try escalation on error
+                if escalation_count < max_escalations:
+                    try:
+                        current_idx = self.ESCALATION_CHAIN.index(current_tier)
+                        if current_idx < len(self.ESCALATION_CHAIN) - 1:
+                            escalation_count += 1
+                            current_tier = self.ESCALATION_CHAIN[current_idx + 1]
+                            logger.info("Escalating after error", next_model=current_tier.value)
+                            continue
+                    except ValueError:
+                        pass
+
+                return {"llm_available": False, "error": str(e)}
+
+    def _invoke_with_retry(
+        self,
+        tier: ModelTier,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> Dict[str, Any]:
+        """Invoke model with retry logic (3 attempts, exponential backoff)."""
+
+        @retry(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=1, max=10),
+            reraise=True,
+        )
+        def _do_invoke():
+            return self._invoke_model(tier, system_prompt, user_prompt)
+
+        return _do_invoke()
 
     def record_usage(
         self,
@@ -229,15 +420,8 @@ class ModelRouter:
         tokens_used: int,
         was_escalation: bool = False
     ) -> None:
-        """
-        Record model usage for cost tracking.
-
-        Args:
-            model: Model that was used
-            tokens_used: Number of tokens consumed
-            was_escalation: Whether this was an escalation from cheaper model
-        """
-        cost = (tokens_used / 1000) * self.MODEL_COSTS[model]
+        """Record model usage for cost tracking."""
+        cost = (tokens_used / 1000) * self.MODEL_COSTS.get(model, 0.001)
 
         self.usage_stats[model]["calls"] += 1
         self.usage_stats[model]["total_cost"] += cost
@@ -247,24 +431,19 @@ class ModelRouter:
 
         logger.debug(
             "Model usage recorded",
-            model=model,
+            model=model.value,
             tokens=tokens_used,
-            cost=cost,
+            cost=round(cost, 6),
             was_escalation=was_escalation
         )
 
     def get_usage_stats(self) -> Dict[str, Any]:
-        """
-        Get model usage statistics.
-
-        Returns:
-            Dict with usage stats per model
-        """
+        """Get model usage statistics."""
         total_cost = sum(stats["total_cost"] for stats in self.usage_stats.values())
         total_calls = sum(stats["calls"] for stats in self.usage_stats.values())
 
         return {
-            "by_model": self.usage_stats,
+            "by_model": {k.value: v for k, v in self.usage_stats.items()},
             "total_cost_usd": round(total_cost, 6),
             "total_calls": total_calls,
             "avg_cost_per_call": round(total_cost / total_calls, 6) if total_calls > 0 else 0

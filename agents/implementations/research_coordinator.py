@@ -49,7 +49,8 @@ class ResearchCoordinatorAgent(BaseAgent):
         self,
         agent_id: str,
         config: Dict[str, Any],
-        binance_client: BinanceFuturesClient
+        binance_client: BinanceFuturesClient,
+        model_router=None
     ):
         """
         Initialize Research Coordinator Agent.
@@ -58,8 +59,9 @@ class ResearchCoordinatorAgent(BaseAgent):
             agent_id: Agent identifier
             config: System configuration
             binance_client: Binance API client
+            model_router: Optional ModelRouter for LLM enhancement
         """
-        super().__init__(agent_id, config)
+        super().__init__(agent_id, config, model_router=model_router)
 
         self.binance_client = binance_client
         self.validator = SchemaValidator()
@@ -124,6 +126,17 @@ class ResearchCoordinatorAgent(BaseAgent):
             # Step 7: Calculate time decay factor (freshness)
             time_decay_factor = 1.0  # Fresh data
 
+            # Step 8: LLM Enhancement (optional - graceful fallback to rule-based)
+            llm_enhancement = self._get_llm_insights(
+                symbol, market_data, technical_indicators, sentiment, market_regime, warnings
+            )
+
+            if llm_enhancement:
+                # Append any LLM-detected warnings
+                for w in llm_enhancement.get("additional_warnings", []):
+                    if w and w not in warnings:
+                        warnings.append(f"[LLM] {w}")
+
             # Build Research Summary
             research_summary = {
                 "schema_version": "1.0.0",
@@ -141,6 +154,18 @@ class ResearchCoordinatorAgent(BaseAgent):
                 "warnings": warnings,
                 "time_decay_factor": time_decay_factor
             }
+
+            # Add LLM enhancement if available
+            if llm_enhancement:
+                research_summary["llm_enhancement"] = {
+                    "enhanced_sentiment": llm_enhancement.get("enhanced_sentiment"),
+                    "pattern_insights": llm_enhancement.get("pattern_insights", []),
+                    "regime_reasoning": llm_enhancement.get("regime_reasoning", ""),
+                    "additional_warnings": llm_enhancement.get("additional_warnings", []),
+                    "key_levels": llm_enhancement.get("key_levels"),
+                    "model_used": llm_enhancement.get("_model_used", "unknown"),
+                    "llm_confidence": llm_enhancement.get("confidence", 0.0),
+                }
 
             # Validate against schema
             is_valid = self.validator.validate_message(
@@ -442,3 +467,54 @@ class ResearchCoordinatorAgent(BaseAgent):
             warnings.append(f"RSI oversold: {rsi:.1f}")
 
         return warnings
+
+    # ========== LLM ENHANCEMENT ==========
+
+    def _get_llm_insights(
+        self,
+        symbol: str,
+        market_data: Dict[str, Any],
+        technical_indicators: Dict[str, Any],
+        sentiment: Dict[str, Any],
+        market_regime: str,
+        warnings: List[str]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Call LLM for enhanced market analysis insights.
+
+        Returns parsed LLM response or None if LLM unavailable/disabled.
+        """
+        from orchestration.model_router import TaskType
+        from prompts.base import build_prompt
+        from prompts.research_coordinator import RESEARCH_COORDINATOR_SYSTEM
+
+        context_data = {
+            "symbol": symbol,
+            "market_data": market_data,
+            "technical_indicators": technical_indicators,
+            "rule_based_sentiment": sentiment,
+            "rule_based_regime": market_regime,
+            "current_warnings": warnings,
+        }
+
+        system_prompt, user_prompt = build_prompt(RESEARCH_COORDINATOR_SYSTEM, context_data)
+
+        result = self.call_llm(
+            task_type=TaskType.PATTERN_MATCHING,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            context="research",
+            max_escalations=1,
+        )
+
+        if result and result.get("response"):
+            response = result["response"]
+            response["_model_used"] = result.get("model_used", "unknown")
+            logger.info(
+                "LLM research enhancement completed",
+                model=result.get("model_used"),
+                llm_confidence=response.get("confidence"),
+            )
+            return response
+
+        return None

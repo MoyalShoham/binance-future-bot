@@ -3,11 +3,12 @@ python-binance==1.0.19          # Binance API wrapper
 ccxt==4.2.25                     # Alternative exchange interface
 
 # LangChain & AI Models
-langchain==0.1.6
-langchain-openai==0.0.5
-langchain-anthropic==0.1.4
-langchain-google-genai==0.0.7
-langgraph==0.0.20
+langchain>=0.2.0,<1.0
+langchain-core>=0.2.0,<1.0
+langchain-anthropic>=0.2.0,<1.0
+langchain-openai>=0.1.0,<1.0
+langchain-google-genai>=0.1.0,<1.0
+langgraph>=0.1.0,<1.0
 
 # Data Processing
 pandas==2.2.0

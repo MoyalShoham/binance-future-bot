@@ -2,6 +2,7 @@
 Base Agent Class
 
 Abstract base class for all trading agents.
+Supports optional LLM enhancement via ModelRouter.
 """
 
 from abc import ABC, abstractmethod
@@ -25,22 +26,36 @@ class BaseAgent(ABC):
     - Logging
     - Error handling
     - Performance tracking
+    - Optional LLM enhancement via ModelRouter
     """
 
-    def __init__(self, agent_id: str, config: Dict[str, Any]):
+    def __init__(self, agent_id: str, config: Dict[str, Any], model_router=None):
         """
         Initialize base agent.
 
         Args:
             agent_id: Unique agent identifier
             config: Agent configuration
+            model_router: Optional ModelRouter for LLM calls (None = rule-based only)
         """
         self.agent_id = agent_id
         self.config = config
         self.validator = get_validator()
         self.logger = logger.bind(agent_id=agent_id)
+        self.model_router = model_router
 
-        self.logger.info("Agent initialized")
+        # Check if LLM is enabled for this specific agent
+        models_config = config.get("models", {})
+        agent_llm_config = models_config.get("agent_llm_enabled", {})
+        # Convert agent_id "research-coordinator" to "research_coordinator" for config lookup
+        config_key = agent_id.replace("-", "_")
+        self.llm_enabled = (
+            model_router is not None
+            and models_config.get("enabled", True)
+            and agent_llm_config.get(config_key, True)
+        )
+
+        self.logger.info("Agent initialized", llm_enabled=self.llm_enabled)
 
     @abstractmethod
     def execute(self, state: Dict[str, Any]) -> Dict[str, Any]:
@@ -54,6 +69,62 @@ class BaseAgent(ABC):
             Agent output (specific to each agent)
         """
         pass
+
+    def call_llm(
+        self,
+        task_type,
+        system_prompt: str,
+        user_prompt: str,
+        context: str = "decision",
+        max_escalations: int = 1,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Safely call LLM via model router with full error recovery.
+
+        Returns parsed JSON response dict or None if LLM unavailable/failed.
+        Callers should ALWAYS have a rule-based fallback path.
+
+        Args:
+            task_type: TaskType enum for model selection
+            system_prompt: System prompt with agent instructions
+            user_prompt: User prompt with context data
+            context: Confidence threshold context
+            max_escalations: Max escalation attempts
+
+        Returns:
+            Dict with 'response', 'model_used', 'confidence', 'tokens' or None
+        """
+        if not self.llm_enabled or not self.model_router:
+            return None
+
+        try:
+            result = self.model_router.invoke(
+                task_type=task_type,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                context=context,
+                max_escalations=max_escalations,
+            )
+
+            if not result.get("llm_available", True):
+                self.logger.warning(
+                    "LLM unavailable, falling back to rule-based",
+                    error=result.get("error")
+                )
+                return None
+
+            if result.get("response") is None:
+                self.logger.warning("LLM returned unparseable response")
+                return None
+
+            return result
+
+        except Exception as e:
+            self.logger.error(
+                "LLM call exception, falling back to rule-based",
+                error=str(e)
+            )
+            return None
 
     def create_agent_message(
         self,

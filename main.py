@@ -136,7 +136,7 @@ def initialize_binance_client(config: dict) -> BinanceFuturesClient:
     return client
 
 
-def initialize_agents(config: dict, binance_client: BinanceFuturesClient, db_session) -> dict:
+def initialize_agents(config: dict, binance_client: BinanceFuturesClient, db_session, model_router: ModelRouter) -> dict:
     """
     Initialize all trading agents.
 
@@ -144,20 +144,21 @@ def initialize_agents(config: dict, binance_client: BinanceFuturesClient, db_ses
         config: Trading configuration
         binance_client: Binance API client
         db_session: Database session instance
+        model_router: ModelRouter instance for LLM calls
 
     Returns:
         Dict of initialized agents
     """
     agents = {
-        "research_coordinator": ResearchCoordinatorAgent("research-coordinator", config, binance_client),
-        "trading_decision": TradingDecisionAgent("trading-decision", config),
-        "risk_manager": RiskManagerAgent("risk-manager", config, binance_client, db_session),
-        "execution_agent": ExecutionAgent("execution-agent", config, binance_client, db_session),
-        "storage_reporter": StorageReporterAgent("storage-reporter", config, db_session),
-        "emergency_controller": EmergencyControllerAgent("emergency-controller", config, binance_client, db_session),
+        "research_coordinator": ResearchCoordinatorAgent("research-coordinator", config, binance_client, model_router=model_router),
+        "trading_decision": TradingDecisionAgent("trading-decision", config, model_router=model_router),
+        "risk_manager": RiskManagerAgent("risk-manager", config, binance_client, db_session),  # NO model_router - stays rule-based
+        "execution_agent": ExecutionAgent("execution-agent", config, binance_client, db_session, model_router=model_router),
+        "storage_reporter": StorageReporterAgent("storage-reporter", config, db_session, model_router=model_router),
+        "emergency_controller": EmergencyControllerAgent("emergency-controller", config, binance_client, db_session, model_router=model_router),
     }
 
-    logger.info("Agents initialized", agent_count=len(agents))
+    logger.info("Agents initialized", agent_count=len(agents), llm_enabled=config.get("models", {}).get("enabled", True))
     return agents
 
 
@@ -265,8 +266,11 @@ def main():
         # Initialize Binance client
         binance_client = initialize_binance_client(config)
 
+        # Initialize model router for LLM calls
+        model_router = ModelRouter(config.get("models", {}))
+
         # Initialize agents
-        agents = initialize_agents(config, binance_client, db_session)
+        agents = initialize_agents(config, binance_client, db_session, model_router)
 
         # Initialize coordinator
         coordinator = TradingCoordinator(config)

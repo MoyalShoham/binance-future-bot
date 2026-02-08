@@ -62,9 +62,30 @@ risk:
       trigger_pct: 0.10  # 10% move in 1 minute
       cooldown_seconds: 300  # 5 minutes
 
-# Model Routing
+# Model Routing & LLM Integration
 models:
-  routing_strategy: "cheap_first"  # Route to cheapest model first
+  enabled: true                      # Master switch for LLM calls
+  routing_strategy: "cheap_first"    # Route to cheapest model first
+  primary_provider: "anthropic"      # Use Claude as primary (all tasks route to Haiku/Sonnet)
+
+  # Per-agent LLM toggle
+  agent_llm_enabled:
+    research_coordinator: true
+    trading_decision: true
+    execution_agent: false           # Start disabled (advisory only)
+    storage_reporter: true
+    emergency_controller: true
+    risk_manager: false              # ALWAYS false - rule-based only for safety
+
+  # Timeout settings
+  timeouts:
+    haiku_seconds: 15
+    sonnet_seconds: 30
+
+  # Cost controls
+  cost_limits:
+    max_cost_per_cycle_usd: 0.05     # Max $0.05 per trading cycle
+    max_daily_cost_usd: 5.00         # Max $5/day
 
   # Confidence thresholds for escalation
   confidence_thresholds:
@@ -75,19 +96,19 @@ models:
 
   # Model hierarchy (cost: low to high)
   model_hierarchy:
-    - name: "gpt-4o-nano"
+    - name: "gpt-4o-mini"
       cost: 0.00015
       use_for: ["classification", "simple_reasoning"]
 
-    - name: "gemini-1.5-flash"
+    - name: "gemini-2.0-flash"
       cost: 0.000075
       use_for: ["pattern_matching", "sentiment_analysis"]
 
-    - name: "claude-3.5-haiku"
+    - name: "claude-3-5-haiku-20241022"
       cost: 0.0008
       use_for: ["risk_reasoning", "complex_decisions"]
 
-    - name: "claude-3.7-sonnet"
+    - name: "claude-sonnet-4-20250514"
       cost: 0.003
       use_for: ["critical_decisions", "anomaly_detection"]
 

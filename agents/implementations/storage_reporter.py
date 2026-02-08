@@ -48,7 +48,7 @@ class StorageReporterAgent(BaseAgent):
     ❌ Modify stored data (immutability)
     """
 
-    def __init__(self, agent_id: str, config: Dict[str, Any], db_session: DatabaseSession):
+    def __init__(self, agent_id: str, config: Dict[str, Any], db_session: DatabaseSession, model_router=None):
         """
         Initialize Storage & Reporting Agent.
 
@@ -56,8 +56,9 @@ class StorageReporterAgent(BaseAgent):
             agent_id: Unique agent identifier
             config: Agent configuration
             db_session: Database session instance
+            model_router: Optional ModelRouter for LLM enhancement
         """
-        super().__init__(agent_id, config)
+        super().__init__(agent_id, config, model_router=model_router)
         self.db_session = db_session
         self.queries = DatabaseQueries(db_session.get_session())
 
@@ -133,6 +134,16 @@ class StorageReporterAgent(BaseAgent):
                     event_data=state,
                     session=session
                 )
+
+                # LLM Enhancement: Generate cycle analysis
+                cycle_analysis = self._get_cycle_analysis(state)
+                if cycle_analysis:
+                    self._store_audit_entry(
+                        correlation_id=state.get("correlation_id"),
+                        event_type="llm_cycle_analysis",
+                        event_data=cycle_analysis,
+                        session=session
+                    )
 
             processing_time = (datetime.utcnow() - start_time).total_seconds() * 1000
 
@@ -598,3 +609,48 @@ class StorageReporterAgent(BaseAgent):
 
         logger.info("Report exported", path=output_path, format=format)
         return output_path
+
+    # ========== LLM ENHANCEMENT ==========
+
+    def _get_cycle_analysis(self, state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Call LLM for post-cycle analytical summary.
+
+        Returns parsed LLM response or None if unavailable.
+        """
+        from orchestration.model_router import TaskType
+        from prompts.base import build_prompt
+        from prompts.storage_reporter import STORAGE_REPORTER_SYSTEM
+
+        # Build a concise context (avoid sending the entire state to save tokens)
+        trading_decision = state.get("trading_decision", {})
+        execution_result = state.get("execution_result", {})
+        research_summary = state.get("research_summary", {})
+
+        context_data = {
+            "symbol": state.get("symbol"),
+            "decision": trading_decision.get("decision"),
+            "strategy": trading_decision.get("strategy_id"),
+            "confidence": trading_decision.get("confidence"),
+            "execution_status": execution_result.get("execution_status"),
+            "market_regime": research_summary.get("market_regime"),
+            "warnings": research_summary.get("warnings", []),
+            "pipeline_stage": state.get("pipeline_stage"),
+            "errors": state.get("errors", []),
+        }
+
+        system_prompt, user_prompt = build_prompt(STORAGE_REPORTER_SYSTEM, context_data)
+
+        result = self.call_llm(
+            task_type=TaskType.SIMPLE_REASONING,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            context="research",
+            max_escalations=0,  # No escalation for post-trade analysis
+        )
+
+        if result and result.get("response"):
+            logger.info("LLM cycle analysis generated", model=result.get("model_used"))
+            return result["response"]
+
+        return None

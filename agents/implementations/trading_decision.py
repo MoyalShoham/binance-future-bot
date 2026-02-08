@@ -43,7 +43,8 @@ class TradingDecisionAgent(BaseAgent):
     def __init__(
         self,
         agent_id: str,
-        config: Dict[str, Any]
+        config: Dict[str, Any],
+        model_router=None
     ):
         """
         Initialize Trading Decision Agent.
@@ -51,8 +52,9 @@ class TradingDecisionAgent(BaseAgent):
         Args:
             agent_id: Agent identifier
             config: System configuration
+            model_router: Optional ModelRouter for LLM enhancement
         """
-        super().__init__(agent_id, config)
+        super().__init__(agent_id, config, model_router=model_router)
 
         self.validator = SchemaValidator()
 
@@ -142,10 +144,48 @@ class TradingDecisionAgent(BaseAgent):
             # Get technical signals summary
             technical_signals = self._get_technical_signals(research_summary)
 
+            # LLM Enhancement: Get holistic assessment of the rule-based decision
+            model_used = "rule-based"
+            llm_reasoning = ""
+            llm_enhancement = self._get_llm_enhancement(
+                research_summary, decision, strategy_id, confidence, strategy_signals
+            )
+
+            if llm_enhancement:
+                # Apply confidence adjustment (clamped: can lower more than raise)
+                adj = llm_enhancement.get("confidence_adjustment", 0)
+                adj = max(-0.30, min(0.15, adj))  # Asymmetric: easier to suppress
+
+                original_confidence = confidence
+                confidence = max(0.0, min(1.0, confidence + adj))
+
+                # Safety: LLM can demote trade to NO_TRADE but cannot promote
+                if original_confidence >= self.min_confidence and confidence < self.min_confidence:
+                    decision = "NO_TRADE"
+                    logger.info(
+                        "LLM lowered confidence below threshold",
+                        original=original_confidence,
+                        adjusted=confidence,
+                        adjustment=adj
+                    )
+
+                # Safety: LLM CANNOT promote NO_TRADE to TRADE
+                # (original NO_TRADE stays NO_TRADE regardless of adjustment)
+
+                model_used = llm_enhancement.get("_model_used", "rule-based")
+                llm_reasoning = llm_enhancement.get("enhanced_reasoning", "")
+
             # Expected holding time based on strategy
             expected_holding_time = self._get_expected_holding_time(strategy_id)
 
             # Build Trading Decision
+            rule_reasoning = self._generate_reasoning(decision, strategy_id, research_summary, confidence)
+            full_reasoning = rule_reasoning
+            if llm_reasoning:
+                full_reasoning = f"{rule_reasoning} | LLM: {llm_reasoning}"
+            # Truncate to schema maxLength
+            full_reasoning = full_reasoning[:1500]
+
             trading_decision = {
                 "schema_version": "1.0.0",
                 "agent_id": self.agent_id,
@@ -157,13 +197,8 @@ class TradingDecisionAgent(BaseAgent):
                 "confidence": confidence,
                 "expected_holding_time_seconds": expected_holding_time,
                 "strategy_id": strategy_id,
-                "model_used": "rule-based",  # No LLM for core strategy logic
-                "reasoning_summary": self._generate_reasoning(
-                    decision,
-                    strategy_id,
-                    research_summary,
-                    confidence
-                ),
+                "model_used": model_used,
+                "reasoning_summary": full_reasoning,
                 "entry_price": entry_price,
                 "stop_loss": stop_loss,
                 "take_profit_levels": take_profit_levels,
@@ -659,3 +694,62 @@ class TradingDecisionAgent(BaseAgent):
             f"{decision} signal from {strategy_name} strategy with {confidence:.0%} confidence. "
             f"Market regime: {market_regime}, RSI: {rsi:.0f}, Volatility: {volatility:.2%}."
         )
+
+    # ========== LLM ENHANCEMENT ==========
+
+    def _get_llm_enhancement(
+        self,
+        research_summary: Dict[str, Any],
+        decision: str,
+        strategy_id: str,
+        confidence: float,
+        strategy_signals: Dict[str, Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Call LLM for enhanced trading decision reasoning.
+
+        The LLM can adjust confidence but CANNOT:
+        - Flip trade direction (LONG->SHORT or vice versa)
+        - Promote NO_TRADE to a TRADE
+
+        Returns parsed LLM response or None if unavailable.
+        """
+        from orchestration.model_router import TaskType
+        from prompts.base import build_prompt
+        from prompts.trading_decision import TRADING_DECISION_SYSTEM
+
+        context_data = {
+            "symbol": research_summary.get("symbol"),
+            "rule_based_decision": decision,
+            "rule_based_strategy": strategy_id,
+            "rule_based_confidence": confidence,
+            "strategy_signals": {k: v for k, v in strategy_signals.items()},
+            "market_regime": research_summary.get("market_regime"),
+            "technical_indicators": research_summary.get("technical_indicators"),
+            "sentiment": research_summary.get("sentiment"),
+            "warnings": research_summary.get("warnings", []),
+            "llm_enhancement": research_summary.get("llm_enhancement"),
+        }
+
+        system_prompt, user_prompt = build_prompt(TRADING_DECISION_SYSTEM, context_data)
+
+        result = self.call_llm(
+            task_type=TaskType.COMPLEX_DECISION,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            context="decision",
+            max_escalations=1,
+        )
+
+        if result and result.get("response"):
+            response = result["response"]
+            response["_model_used"] = result.get("model_used", "unknown")
+            logger.info(
+                "LLM trading decision enhancement completed",
+                model=result.get("model_used"),
+                confidence_adjustment=response.get("confidence_adjustment"),
+                llm_confidence=response.get("confidence"),
+            )
+            return response
+
+        return None

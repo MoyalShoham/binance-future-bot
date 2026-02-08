@@ -50,7 +50,8 @@ class ExecutionAgent(BaseAgent):
         agent_id: str,
         config: Dict[str, Any],
         binance_client,
-        db_session=None
+        db_session=None,
+        model_router=None
     ):
         """
         Initialize Execution Agent.
@@ -60,8 +61,9 @@ class ExecutionAgent(BaseAgent):
             config: System configuration
             binance_client: Binance API client
             db_session: Database session (optional, for position tracking)
+            model_router: Optional ModelRouter for LLM enhancement
         """
-        super().__init__(agent_id, config)
+        super().__init__(agent_id, config, model_router=model_router)
 
         self.binance_client = binance_client
         self.db_session = db_session

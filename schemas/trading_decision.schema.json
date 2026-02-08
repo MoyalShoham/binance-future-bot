@@ -56,28 +56,29 @@
     },
     "expected_holding_time_seconds": {
       "type": "integer",
-      "minimum": 30,
+      "minimum": 0,
       "maximum": 3600,
-      "description": "Expected time to hold position (for scalping strategies)"
+      "description": "Expected time to hold position (for scalping strategies, 0 for NO_TRADE)"
     },
     "strategy_id": {
       "type": "string",
       "enum": [
+        "none",
         "ema_crossover_scalp",
         "vwap_bounce_scalp",
         "orderbook_imbalance_scalp",
         "momentum_breakout_scalp"
       ],
-      "description": "Strategy that generated this decision"
+      "description": "Strategy that generated this decision (none for NO_TRADE)"
     },
     "model_used": {
       "type": "string",
-      "enum": ["rule-based", "gpt-4o-nano", "gemini-1.5-flash", "claude-3.5-haiku", "claude-3.7-sonnet"],
+      "enum": ["rule-based", "gpt-4o-mini", "gemini-2.0-flash", "claude-3-5-haiku-20241022", "claude-sonnet-4-20250514"],
       "description": "Model used for reasoning (rule-based for deterministic strategies, or AI model name)"
     },
     "reasoning_summary": {
       "type": "string",
-      "maxLength": 500,
+      "maxLength": 1500,
       "description": "Human-readable explanation of the decision"
     },
     "entry_price": {
