@@ -200,8 +200,6 @@ class BinanceFuturesClient:
             imbalance_ratio = (bid_depth - ask_depth) / (bid_depth + ask_depth) if (bid_depth + ask_depth) > 0 else 0
 
             return {
-                "bids": bids,
-                "asks": asks,
                 "bid_depth": bid_depth,
                 "ask_depth": ask_depth,
                 "imbalance_ratio": imbalance_ratio
