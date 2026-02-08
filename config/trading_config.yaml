@@ -197,6 +197,29 @@ strategies:
     volume_multiplier: 1.5  # 1.5x average volume required
     expected_holding_time_seconds: 240
 
+# Trailing Stop Configuration
+trailing_stop:
+  enabled: true
+  check_interval_seconds: 10
+
+  # Trail activation: only start trailing after position moves this % in profit
+  activation_threshold_pct: 0.002  # 0.2%
+
+  # Trail distance: close when price retraces this % from peak
+  trail_distance_pct: 0.005  # 0.5%
+
+  # Breakeven: move stop to entry after this % profit
+  breakeven_threshold_pct: 0.003  # 0.3%
+
+  # Hard stop loss: fallback % if no stop_loss in trading decision
+  hard_stop_fallback_pct: 0.02  # 2%
+
+  # Time-based exit (overrides scalping.max_holding_time_seconds if set)
+  max_holding_time_seconds: 600  # 10 minutes
+
+  # Logging
+  log_peak_updates: false  # Reduce log spam
+
 # Monitoring & Alerts
 monitoring:
   # API health

@@ -198,6 +198,19 @@ class DatabaseQueries:
         winning_trades = sum(1 for p in closed_positions if p.realized_pnl_usdt > 0)
         return winning_trades / len(closed_positions)
 
+    def get_stop_loss_for_position(self, execution_id: str) -> Optional[float]:
+        """Get the original stop_loss price from the trading decision linked to an execution."""
+        execution = self.session.query(Execution).filter(
+            Execution.id == execution_id
+        ).first()
+        if execution:
+            decision = self.session.query(TradingDecision).filter(
+                TradingDecision.id == execution.decision_id
+            ).first()
+            if decision:
+                return decision.stop_loss
+        return None
+
     # ========== Audit Trail Queries ==========
 
     def get_audit_trail(

@@ -1,8 +1,8 @@
 # Implementation Summary
 
-**Last Updated**: 2026-02-07
-**Current Branch**: feature/database-integration
-**Phase**: Phase 2 - Database Integration (COMPLETED)
+**Last Updated**: 2026-02-08
+**Current Branch**: master
+**Phase**: Phase 2 - Database Integration (COMPLETED), Trailing Stop System (COMPLETED)
 
 ---
 
@@ -499,3 +499,77 @@ The database integration is **complete and production-ready**. You can now:
 - [ ] Implement data retention policies
 - [ ] Add database performance monitoring
 - [ ] Create dashboard for metrics visualization
+
+---
+
+## Smart Trailing Stop System - COMPLETED ✅
+
+**Completion Date**: 2026-02-08
+
+### Overview
+
+Active position management system that runs in the EmergencyController's background thread. Monitors open positions every 10 seconds, tracks peak prices, and closes positions when stop conditions are met.
+
+### Files Created (1 file)
+
+1. ✅ `infrastructure/trailing_stop.py` - TrailingStopMonitor class (~270 lines)
+
+### Files Modified (3 files)
+
+2. ✅ `agents/implementations/emergency_controller.py` - Integrated trailing stop into monitoring loop
+3. ✅ `config/trading_config.yaml` - Added `trailing_stop` configuration section
+4. ✅ `infrastructure/database/queries.py` - Added `get_stop_loss_for_position()` query
+
+### Position State Machine
+
+```
+MONITORING (position opened, tracking peak)
+    |
+    +--> TRAILING_ACTIVE (price moved past 0.2% activation threshold)
+    |       |
+    |       +--> CLOSED (price retraced 0.5% from peak)
+    |
+    +--> BREAKEVEN_ACTIVE (price hit 0.3% profit threshold)
+    |       |
+    |       +--> CLOSED (price returned to entry)
+    |
+    +--> CLOSED (hard stop from TradingDecision, or 2% fallback)
+    +--> CLOSED (held past 600s max holding time)
+```
+
+### Close Reasons
+
+| Reason | Trigger | Description |
+|--------|---------|-------------|
+| `TRAIL_STOP` | Price retraces 0.5% from peak | Main profit protection mechanism |
+| `HARD_STOP` | Price hits stop_loss from TradingDecision | Loss prevention (falls back to 2%) |
+| `TIME_EXIT` | Position held > 600 seconds | Prevents capital lock-up in scalping |
+| `BREAKEVEN_STOP` | Price returns to entry after 0.3% profit | Protects against giving back gains |
+
+### Key Features
+
+- **Peak price tracking**: In-memory dict keyed by PnL ledger ID, updated every 10s
+- **Paper mode support**: Skips Binance API close order, just updates DB
+- **Thread safety**: `closing_in_progress` set prevents duplicate closes
+- **P&L calculation**: Accounts for entry + exit taker fees (5 bps each)
+- **Hard stop lookup**: Traces Execution → TradingDecision to find original stop_loss
+- **Stale cleanup**: Removes tracking state for positions that no longer exist
+
+### Monitoring Loop Changes
+
+The EmergencyController monitoring loop was restructured:
+- **Before**: Health checks every 60 seconds
+- **After**: Trailing stop checks every 10 seconds, health checks every 60 seconds (every 6th iteration)
+
+### Configuration (`trailing_stop` section in trading_config.yaml)
+
+```yaml
+trailing_stop:
+  enabled: true
+  activation_threshold_pct: 0.002  # 0.2% - start trailing
+  trail_distance_pct: 0.005        # 0.5% - close on retrace
+  breakeven_threshold_pct: 0.003   # 0.3% - move stop to entry
+  hard_stop_fallback_pct: 0.02     # 2% - fallback if no decision stop
+  max_holding_time_seconds: 600    # 10 minutes
+  log_peak_updates: false          # Reduce log spam
+```

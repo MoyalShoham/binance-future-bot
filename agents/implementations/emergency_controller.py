@@ -12,6 +12,7 @@ import threading
 import structlog
 
 from .base_agent import BaseAgent
+from infrastructure.trailing_stop import TrailingStopMonitor
 
 logger = structlog.get_logger()
 
@@ -67,6 +68,7 @@ class EmergencyControllerAgent(BaseAgent):
         self.kill_switch_manager = KillSwitchManager(config)
         self.system_monitor = SystemHealthMonitor(binance_client, db_session)
         self.anomaly_detector = AnomalyDetector(config)
+        self.trailing_stop_monitor = TrailingStopMonitor(binance_client, db_session, config)
 
         # Continuous monitoring
         self.monitoring_active = False
@@ -157,20 +159,29 @@ class EmergencyControllerAgent(BaseAgent):
         logger.info("Continuous monitoring stopped")
 
     def _monitoring_loop(self):
-        """Main monitoring loop (runs in background thread)."""
+        """Main monitoring loop (runs in background thread).
+
+        Runs trailing stop checks every 10 seconds and health checks every 60 seconds.
+        """
         logger.info("Monitoring loop started")
+        health_check_counter = 0
 
         while self.monitoring_active:
             try:
-                # Perform all health checks
-                self._perform_health_checks()
+                # Run trailing stop check every 10 seconds
+                self.trailing_stop_monitor.check_all_positions()
 
-                # Sleep until next check
-                time.sleep(self.check_interval_seconds)
+                # Run health checks every 60 seconds (every 6th iteration)
+                health_check_counter += 1
+                if health_check_counter >= 6:
+                    self._perform_health_checks()
+                    health_check_counter = 0
+
+                time.sleep(10)
 
             except Exception as e:
                 logger.error("Monitoring loop error", error=str(e), exc_info=True)
-                time.sleep(10)  # Brief pause before retry
+                time.sleep(10)
 
         logger.info("Monitoring loop exited")
 
@@ -243,8 +254,8 @@ class EmergencyControllerAgent(BaseAgent):
         self.kill_switch_manager.activate_global_kill_switch(reason, close_positions)
 
         if close_positions:
-            # TODO: Implement position closing logic
-            logger.warning("Position closing not yet implemented")
+            logger.warning("Emergency close: closing all open positions via trailing stop monitor")
+            self.trailing_stop_monitor.check_all_positions()
 
     def deactivate_global_kill_switch(self):
         """Deactivate global kill switch."""
