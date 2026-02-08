@@ -830,7 +830,7 @@ class RiskManagerAgent(BaseAgent):
 
                 # Calculate current exposure
                 current_exposure = sum(
-                    pos.entry_price * pos.quantity * pos.leverage
+                    pos.entry_price * pos.quantity / pos.leverage
                     for pos in open_positions
                 )
 
@@ -870,7 +870,7 @@ class RiskManagerAgent(BaseAgent):
                     self.queries.session = session
                     open_positions = self.queries.get_open_positions()
                     current_exposure = sum(
-                        pos.entry_price * pos.quantity * pos.leverage
+                        pos.entry_price * pos.quantity / pos.leverage
                         for pos in open_positions
                     )
                     today_start = datetime.combine(datetime.today(), datetime.min.time())
