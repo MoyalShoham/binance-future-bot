@@ -21,7 +21,9 @@
       "Bash(gh repo edit:*)",
       "Bash(conda create:*)",
       "Bash(./.conda/python.exe:*)",
-      "Bash(..condapython.exe main.py --mode paper --symbol BTCUSDT)"
+      "Bash(..condapython.exe main.py --mode paper --symbol BTCUSDT)",
+      "Bash(sqlite3:*)",
+      "Bash(tee:*)"
     ]
   }
 }

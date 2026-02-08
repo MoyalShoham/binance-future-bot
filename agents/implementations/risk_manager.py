@@ -102,12 +102,17 @@ class RiskManagerAgent(BaseAgent):
         self.vol_breaker_trigger_pct = vol_breaker.get("trigger_pct", 0.10)
         self.vol_breaker_cooldown_seconds = vol_breaker.get("cooldown_seconds", 300)
 
+        # Check paper trading config
+        paper_config = config.get("execution", {}).get("paper_trading", {})
+        simulated_balance_config = paper_config.get("simulated_balance_usdt", 0)
+
         logger.info(
             "Risk Manager Agent initialized (GLOBAL AUTHORITY)",
             agent_id=self.agent_id,
             max_risk_per_trade_pct=self.max_risk_per_trade_pct,
             max_daily_drawdown_pct=self.max_daily_drawdown_pct,
-            max_portfolio_exposure_pct=self.max_portfolio_exposure_pct
+            max_portfolio_exposure_pct=self.max_portfolio_exposure_pct,
+            simulated_balance_usdt=simulated_balance_config
         )
 
     def execute(self, state: Dict[str, Any]) -> Dict[str, Any]:
@@ -853,6 +858,11 @@ class RiskManagerAgent(BaseAgent):
             # For paper trading, use simulated balance from config
             paper_config = self.config.get("execution", {}).get("paper_trading", {})
             simulated_balance = paper_config.get("simulated_balance_usdt", 0)
+
+            logger.warning(
+                "Using simulated balance for paper trading (API unavailable)",
+                simulated_balance=simulated_balance
+            )
 
             # Get open positions from database for exposure calculation
             try:

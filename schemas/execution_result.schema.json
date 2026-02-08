@@ -220,8 +220,8 @@
           "description": "Whether this was a duplicate submission"
         },
         "original_execution_id": {
-          "type": "string",
-          "description": "Reference to original execution if duplicate"
+          "type": ["string", "null"],
+          "description": "Reference to original execution if duplicate (null if not duplicate)"
         }
       }
     }
