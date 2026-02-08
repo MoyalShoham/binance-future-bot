@@ -123,7 +123,7 @@ class StorageReporterAgent(BaseAgent):
                     logger.info("Execution result stored", execution_id=execution_id)
 
                     # Update P&L if execution was successful
-                    if state["execution_result"].get("execution_status") == "FILLED":
+                    if state["execution_result"].get("execution_status") in ("FILLED", "PARTIALLY_FILLED"):
                         self._update_pnl(state["execution_result"], session)
 
                 # Store audit trail entry

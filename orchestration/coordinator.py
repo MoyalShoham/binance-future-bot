@@ -43,7 +43,12 @@ class TradingCoordinator:
         # Build execution graph
         self.graph = self._build_execution_graph()
 
-        logger.info("TradingCoordinator initialized", config=config)
+        logger.info(
+            "TradingCoordinator initialized",
+            execution_mode=config.get("trading", {}).get("execution_mode"),
+            symbols=config.get("trading", {}).get("symbols", []),
+            max_positions=config.get("trading", {}).get("max_concurrent_positions")
+        )
 
     def register_agent(self, agent_name: str, agent_instance: Any) -> None:
         """

@@ -26,21 +26,43 @@ from agents.implementations import (
 from infrastructure.binance_api import BinanceFuturesClient
 from infrastructure.database import init_database
 
-# Set root logging level to INFO so structlog filter_by_level works correctly
-logging.basicConfig(format="%(message)s", stream=sys.stderr, level=logging.INFO)
+# Ensure logs directory exists
+os.makedirs("logs", exist_ok=True)
 
-# Configure structured logging
+# Set root logging level to INFO so structlog filter_by_level works correctly
+# Configure both console and file output
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+
+# Console handler
+console_handler = logging.StreamHandler(sys.stderr)
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(logging.Formatter("%(message)s"))
+root_logger.addHandler(console_handler)
+
+# File handler with rotation
+from logging.handlers import RotatingFileHandler
+file_handler = RotatingFileHandler(
+    "logs/trading_system.log",
+    maxBytes=100 * 1024 * 1024,  # 100 MB
+    backupCount=10,
+    encoding="utf-8"
+)
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(logging.Formatter("%(message)s"))
+root_logger.addHandler(file_handler)
+
+# Configure structured logging (no colors for clean file output)
 structlog.configure(
     processors=[
         structlog.stdlib.filter_by_level,
-        structlog.stdlib.add_logger_name,
         structlog.stdlib.add_log_level,
         structlog.stdlib.PositionalArgumentsFormatter(),
-        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S"),
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
         structlog.processors.UnicodeDecoder(),
-        structlog.dev.ConsoleRenderer()
+        structlog.dev.ConsoleRenderer(colors=False)
     ],
     context_class=dict,
     logger_factory=structlog.stdlib.LoggerFactory(),
@@ -197,8 +219,8 @@ def main():
     parser.add_argument(
         "--symbol",
         type=str,
-        default="XRPUSDT",
-        help="Trading symbol (default: XRPUSDT)"
+        default="all",
+        help="Trading symbol or 'all' for all configured symbols (default: all)"
     )
     parser.add_argument(
         "--config",
@@ -259,17 +281,27 @@ def main():
         if emergency_controller:
             emergency_controller.start_continuous_monitoring()
 
+        # Determine symbols to trade
+        if args.symbol.lower() == "all":
+            symbols = config.get("trading", {}).get("symbols", ["XRPUSDT"])
+        else:
+            symbols = [args.symbol]
+
+        logger.info("Trading symbols", symbols=symbols)
+
         # Run trading cycles
         if args.continuous:
             logger.info("Running in continuous mode", interval_seconds=args.interval)
 
             import time
             while True:
-                run_single_cycle(coordinator, args.symbol, execution_mode)
+                for symbol in symbols:
+                    run_single_cycle(coordinator, symbol, execution_mode)
                 time.sleep(args.interval)
         else:
-            # Single cycle
-            run_single_cycle(coordinator, args.symbol, execution_mode)
+            # Single cycle across all symbols
+            for symbol in symbols:
+                run_single_cycle(coordinator, symbol, execution_mode)
 
     except KeyboardInterrupt:
         logger.info("Shutting down gracefully...")

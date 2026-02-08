@@ -268,6 +268,11 @@ class RiskManagerAgent(BaseAgent):
             account_status
         )
 
+        # Check 10: Duplicate Position (same symbol already open on Binance)
+        risk_checks["duplicate_position"] = self._check_duplicate_position(
+            trading_decision.get("symbol")
+        )
+
         return risk_checks
 
     def _check_kill_switches(
@@ -349,7 +354,7 @@ class RiskManagerAgent(BaseAgent):
         entry_price = trading_decision.get("entry_price", 0)
         stop_loss = trading_decision.get("stop_loss", 0)
         position_size_usdt = trading_decision.get("position_size_usdt", 0)
-        total_equity = account_status.get("total_equity", 1)
+        total_equity = max(account_status.get("total_equity", 1), 0.01)
 
         # Calculate risk
         if entry_price == 0 or stop_loss == 0:
@@ -389,7 +394,7 @@ class RiskManagerAgent(BaseAgent):
         """Check 4: Max Portfolio Exposure"""
 
         current_exposure = account_status.get("current_exposure", 0)
-        total_equity = account_status.get("total_equity", 1)
+        total_equity = max(account_status.get("total_equity", 1), 0.01)
         new_position_size = trading_decision.get("position_size_usdt", 0)
 
         total_exposure = current_exposure + new_position_size
@@ -515,7 +520,7 @@ class RiskManagerAgent(BaseAgent):
         """Check 8: Position Concentration"""
 
         position_size_usdt = trading_decision.get("position_size_usdt", 0)
-        total_equity = account_status.get("total_equity", 1)
+        total_equity = max(account_status.get("total_equity", 1), 0.01)
 
         concentration_pct = position_size_usdt / total_equity
 
@@ -532,6 +537,35 @@ class RiskManagerAgent(BaseAgent):
                 else f"Position concentration within limit ({concentration_pct:.2%} / {self.max_position_concentration_pct:.2%})"
             )
         }
+
+    def _check_duplicate_position(self, symbol: str) -> Dict[str, Any]:
+        """Check 10: Reject if there's already an open position for this symbol on Binance."""
+        try:
+            positions = self.binance_client.get_positions()
+            for pos in positions:
+                if pos.get("symbol") == symbol:
+                    amt = pos.get("position_amount", 0)
+                    return {
+                        "passed": False,
+                        "current_value": abs(amt),
+                        "limit": 0,
+                        "severity": "critical",
+                        "message": f"Already have open position on {symbol}: {amt} units"
+                    }
+            return {
+                "passed": True,
+                "current_value": 0,
+                "limit": 0,
+                "message": f"No existing position on {symbol}"
+            }
+        except Exception as e:
+            logger.warning("Failed to check duplicate positions", error=str(e))
+            return {
+                "passed": True,
+                "current_value": 0,
+                "limit": 0,
+                "message": "Could not verify positions (allowing trade)"
+            }
 
     def _check_available_margin(
         self,
@@ -610,6 +644,8 @@ class RiskManagerAgent(BaseAgent):
 
         # Kelly formula: (p * rr - (1 - p)) / rr
         # where p = win probability, rr = risk/reward ratio
+        if rr_ratio <= 0:
+            rr_ratio = 2.0  # Fallback to safe default
         kelly_pct = (win_prob * rr_ratio - (1 - win_prob)) / rr_ratio
         kelly_pct = max(0, kelly_pct)  # Never negative
 
@@ -620,7 +656,7 @@ class RiskManagerAgent(BaseAgent):
         final_risk_pct = min(adjusted_kelly_pct, self.max_risk_per_trade_pct)
 
         # Calculate position size
-        total_equity = account_status.get("total_equity", 1)
+        total_equity = max(account_status.get("total_equity", 1), 0.01)
         risk_amount = total_equity * final_risk_pct
 
         # Calculate stop distance
@@ -662,7 +698,7 @@ class RiskManagerAgent(BaseAgent):
             atr = tech_indicators.get("atr", 0)
 
         entry_price = trading_decision.get("entry_price", 0)
-        total_equity = account_status.get("total_equity", 1)
+        total_equity = max(account_status.get("total_equity", 1), 0.01)
 
         # Stop distance = ATR * multiplier
         stop_distance = atr * self.atr_multiplier
@@ -691,7 +727,7 @@ class RiskManagerAgent(BaseAgent):
     ) -> Dict[str, Any]:
         """Fixed percentage position sizing."""
 
-        total_equity = account_status.get("total_equity", 1)
+        total_equity = max(account_status.get("total_equity", 1), 0.01)
         risk_amount = total_equity * self.max_risk_per_trade_pct
 
         entry_price = trading_decision.get("entry_price", 0)
@@ -820,8 +856,8 @@ class RiskManagerAgent(BaseAgent):
             balance_data = self.binance_client.get_account_balance()
 
             available_balance = balance_data.get("available_balance", 0)
-            total_equity = balance_data.get("total_wallet_balance", 0)
-            unrealized_pnl = balance_data.get("total_unrealized_profit", 0)
+            total_equity = balance_data.get("total_equity", 0)
+            unrealized_pnl = balance_data.get("unrealized_pnl", 0)
 
             # Get open positions from database
             with self.db_session.session_scope() as session:
@@ -838,6 +874,9 @@ class RiskManagerAgent(BaseAgent):
                 today_start = datetime.combine(datetime.today(), datetime.min.time())
                 today_end = datetime.now()
                 daily_pnl = self.queries.calculate_total_pnl(today_start, today_end)
+
+            # Ensure total_equity is never zero (safety guard)
+            total_equity = max(total_equity, 0.01)
 
             # Calculate daily drawdown
             daily_drawdown_pct = daily_pnl / total_equity if total_equity > 0 else 0

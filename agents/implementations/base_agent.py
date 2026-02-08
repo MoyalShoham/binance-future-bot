@@ -40,7 +40,7 @@ class BaseAgent(ABC):
         self.validator = get_validator()
         self.logger = logger.bind(agent_id=agent_id)
 
-        self.logger.info("Agent initialized", config=config)
+        self.logger.info("Agent initialized")
 
     @abstractmethod
     def execute(self, state: Dict[str, Any]) -> Dict[str, Any]:

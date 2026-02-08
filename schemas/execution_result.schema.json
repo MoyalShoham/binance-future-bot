@@ -54,8 +54,8 @@
           "description": "Binance API order ID (null for paper trading)"
         },
         "client_order_id": {
-          "type": "string",
-          "description": "Client-generated idempotent order ID"
+          "type": ["string", "null"],
+          "description": "Client-generated idempotent order ID (null for rejected trades)"
         },
         "order_type": {
           "type": "string",
@@ -96,8 +96,8 @@
         },
         "leverage": {
           "type": "integer",
-          "minimum": 1,
-          "maximum": 20
+          "minimum": 0,
+          "maximum": 125
         },
         "position_value_usdt": {
           "type": "number",

@@ -41,6 +41,21 @@ class OrderExecutor:
     - Idempotent order submission to prevent duplicates
     """
 
+    # Binance Futures minimum quantity and step sizes for common symbols
+    SYMBOL_RULES = {
+        "XRPUSDT": {"min_qty": 0.1, "step_size": 0.1, "min_notional": 5.0},
+        "LINKUSDT": {"min_qty": 0.01, "step_size": 0.01, "min_notional": 5.0},
+        "DOGEUSDT": {"min_qty": 1, "step_size": 1, "min_notional": 5.0},
+        "1000SHIBUSDT": {"min_qty": 1, "step_size": 1, "min_notional": 5.0},
+        "1000FLOKIUSDT": {"min_qty": 1, "step_size": 1, "min_notional": 5.0},
+        "ADAUSDT": {"min_qty": 0.1, "step_size": 0.1, "min_notional": 5.0},
+        "DOTUSDT": {"min_qty": 0.1, "step_size": 0.1, "min_notional": 5.0},
+        "AVAXUSDT": {"min_qty": 0.1, "step_size": 0.1, "min_notional": 5.0},
+        "BTCUSDT": {"min_qty": 0.001, "step_size": 0.001, "min_notional": 5.0},
+        "ETHUSDT": {"min_qty": 0.001, "step_size": 0.001, "min_notional": 5.0},
+    }
+    DEFAULT_RULES = {"min_qty": 0.001, "step_size": 0.001, "min_notional": 5.0}
+
     def __init__(self, binance_client, config: Dict[str, Any]):
         """
         Initialize order executor.
@@ -176,8 +191,12 @@ class OrderExecutor:
             entry_price = approval["entry_price"]
             leverage = approval["modified_parameters"]["leverage"]
 
-            # Calculate quantity
+            # Calculate quantity with proper rounding
             quantity = position_size_usdt / entry_price
+            quantity = self._round_quantity(symbol, quantity)
+            rules = self.SYMBOL_RULES.get(symbol, self.DEFAULT_RULES)
+            if quantity < rules["min_qty"]:
+                quantity = rules["min_qty"]
 
             # Simulate slippage
             simulated_slippage_bps = self._calculate_simulated_slippage(
@@ -301,28 +320,42 @@ class OrderExecutor:
             leverage = approval["modified_parameters"]["leverage"]
 
             # Set leverage
-            self.binance_client.futures_change_leverage(symbol=symbol, leverage=leverage)
+            self.binance_client.change_leverage(symbol=symbol, leverage=leverage)
 
-            # Calculate quantity
+            # Calculate quantity and round to symbol's step size
             quantity = position_size_usdt / entry_price
+            quantity = self._round_quantity(symbol, quantity)
+
+            # Enforce minimum quantity and notional
+            rules = self.SYMBOL_RULES.get(symbol, self.DEFAULT_RULES)
+            if quantity < rules["min_qty"]:
+                quantity = rules["min_qty"]
+            notional = quantity * entry_price
+            if notional < rules["min_notional"]:
+                quantity = self._round_quantity(symbol, rules["min_notional"] / entry_price + rules["step_size"])
+
+            logger.info("Order quantity calculated", symbol=symbol, quantity=quantity, notional=quantity * entry_price)
 
             # Place market order
-            order = self.binance_client.futures_create_order(
+            order = self.binance_client.create_order(
                 symbol=symbol,
                 side="BUY" if side == "LONG" else "SELL",
-                type="MARKET",
+                order_type="MARKET",
                 quantity=quantity,
-                newClientOrderId=client_order_id
+                client_order_id=client_order_id
             )
 
             # Parse order result
             binance_order_id = order["orderId"]
             filled_quantity = float(order["executedQty"])
-            avg_fill_price = float(order["avgPrice"]) if "avgPrice" in order else entry_price
+            avg_fill_price = float(order.get("avgPrice", 0))
+            # Binance may return avgPrice=0 for MARKET orders - use entry_price as fallback
+            if avg_fill_price == 0:
+                avg_fill_price = entry_price
 
             # Calculate slippage and fees
             slippage_usdt = abs(avg_fill_price - entry_price) * filled_quantity
-            slippage_bps = (slippage_usdt / position_size_usdt) * 10000
+            slippage_bps = (slippage_usdt / max(position_size_usdt, 0.01)) * 10000
 
             # Estimate fees (will be confirmed later)
             fees_usdt = position_size_usdt * (self.paper_config["taker_fee_bps"] / 10000)
@@ -334,7 +367,7 @@ class OrderExecutor:
                 "approval_id": approval["approval_id"],
                 "decision_id": approval["decision_id"],
                 "execution_mode": ExecutionMode.LIVE,
-                "execution_status": ExecutionStatus.FILLED if filled_quantity == quantity else ExecutionStatus.PARTIALLY_FILLED,
+                "execution_status": ExecutionStatus.FILLED if filled_quantity >= quantity * 0.99 else ExecutionStatus.PARTIALLY_FILLED,
                 "symbol": symbol,
                 "side": side,
                 "order_details": {
@@ -433,6 +466,18 @@ class OrderExecutor:
 
         return result
 
+    def _round_quantity(self, symbol: str, quantity: float) -> float:
+        """Round quantity to symbol's step size and enforce minimum."""
+        import math
+        rules = self.SYMBOL_RULES.get(symbol, self.DEFAULT_RULES)
+        step = rules["step_size"]
+        # Floor to step size
+        rounded = math.floor(quantity / step) * step
+        # Round to avoid floating point issues
+        decimals = len(str(step).rstrip('0').split('.')[-1]) if '.' in str(step) else 0
+        rounded = round(rounded, decimals)
+        return rounded
+
     def _calculate_simulated_slippage(
         self,
         position_size_usdt: float,
@@ -483,8 +528,9 @@ class OrderExecutor:
         Returns:
             Comparison dict with divergence metrics
         """
-        divergence_usdt = abs(live_price - shadow_price) * (position_size / live_price)
-        divergence_pct = abs(live_price - shadow_price) / live_price
+        safe_live_price = max(live_price, 0.0001)
+        divergence_usdt = abs(live_price - shadow_price) * (position_size / safe_live_price)
+        divergence_pct = abs(live_price - shadow_price) / safe_live_price
 
         threshold = self.hybrid_config["divergence_threshold_pct"]
         divergence_alert = divergence_pct > threshold
@@ -506,6 +552,7 @@ class OrderExecutor:
         error_message: str
     ) -> Dict[str, Any]:
         """Create execution result for failed execution."""
+        leverage = approval.get("modified_parameters", {}).get("leverage", 1)
         return {
             "execution_id": execution_id,
             "approval_id": approval["approval_id"],
@@ -525,7 +572,7 @@ class OrderExecutor:
                 "slippage_usdt": 0,
                 "slippage_bps": 0,
                 "fees_usdt": 0,
-                "leverage": 0,
+                "leverage": leverage,
                 "position_value_usdt": 0
             },
             "errors": [

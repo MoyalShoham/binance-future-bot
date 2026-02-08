@@ -289,13 +289,12 @@ class ExecutionAgent(BaseAgent):
             stop_side = "SELL" if side == "LONG" else "BUY"
 
             # Place STOP_MARKET order
-            stop_order = self.binance_client.futures_create_order(
+            stop_order = self.binance_client.create_order(
                 symbol=symbol,
                 side=stop_side,
-                type="STOP_MARKET",
+                order_type="STOP_MARKET",
                 quantity=quantity,
-                stopPrice=stop_price,
-                closePosition=True  # Close entire position
+                stop_price=stop_price
             )
 
             logger.info(
@@ -360,13 +359,13 @@ class ExecutionAgent(BaseAgent):
                 tp_quantity = filled_quantity * quantity_pct
 
                 try:
-                    # Place LIMIT order for take profit
-                    tp_order = self.binance_client.futures_create_order(
+                    # Place TAKE_PROFIT_MARKET order
+                    tp_order = self.binance_client.create_order(
                         symbol=symbol,
                         side=tp_side,
-                        type="TAKE_PROFIT_MARKET",
-                        quantity=tp_quantity,
-                        stopPrice=tp_price
+                        order_type="TAKE_PROFIT_MARKET",
+                        quantity=round(tp_quantity, 3),
+                        stop_price=tp_price
                     )
 
                     logger.info(
@@ -445,7 +444,7 @@ class ExecutionAgent(BaseAgent):
                 "slippage_usdt": 0,
                 "slippage_bps": 0,
                 "fees_usdt": 0,
-                "leverage": 0,
+                "leverage": trading_decision.get("leverage", 1),
                 "position_value_usdt": 0
             },
             "errors": [

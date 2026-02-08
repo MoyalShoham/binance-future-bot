@@ -3,7 +3,7 @@
 # Execution Settings
 trading:
   enabled: true
-  execution_mode: "paper"  # paper | live | hybrid
+  execution_mode: "live"  # paper | live | hybrid
   testnet: false  # Use Binance mainnet for market data
   max_concurrent_positions: 3
   default_leverage: 10
@@ -93,6 +93,10 @@ models:
 
 # Execution Configuration
 execution:
+  # Protective orders (disabled - Binance moved STOP_MARKET to Algo Order API)
+  place_stop_loss: false
+  place_take_profit: false
+
   # Paper trading settings
   paper_trading:
     enabled: true
