@@ -4,7 +4,7 @@
 trading:
   enabled: true
   execution_mode: "paper"  # paper | live | hybrid
-  testnet: true  # Use Binance testnet (safe for testing)
+  testnet: false  # Use Binance mainnet for market data (paper mode = no real orders)
   max_concurrent_positions: 5
   default_leverage: 5
 
