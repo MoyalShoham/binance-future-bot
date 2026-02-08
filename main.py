@@ -157,13 +157,21 @@ def run_single_cycle(
     try:
         final_state = coordinator.run_trading_cycle(symbol=symbol, mode=mode)
 
+        # Handle None final_state (should not happen, but add safety check)
+        if final_state is None:
+            logger.error("Trading cycle returned None state")
+            return
+
         # Log results
+        trading_decision = final_state.get("trading_decision") or {}
+        execution_result = final_state.get("execution_result") or {}
+
         logger.info(
             "Trading cycle completed",
             correlation_id=final_state.get("correlation_id"),
             pipeline_stage=final_state.get("pipeline_stage"),
-            decision=final_state.get("trading_decision", {}).get("decision"),
-            execution_status=final_state.get("execution_result", {}).get("execution_status"),
+            decision=trading_decision.get("decision"),
+            execution_status=execution_result.get("execution_status"),
             total_time_ms=final_state.get("total_processing_time_ms"),
             errors=len(final_state.get("errors", []))
         )
