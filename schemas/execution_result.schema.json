@@ -50,7 +50,7 @@
       "type": "object",
       "properties": {
         "binance_order_id": {
-          "type": "string",
+          "type": ["string", "null"],
           "description": "Binance API order ID (null for paper trading)"
         },
         "client_order_id": {
@@ -109,7 +109,7 @@
     "stop_loss_order": {
       "type": "object",
       "properties": {
-        "binance_order_id": {"type": "string"},
+        "binance_order_id": {"type": ["string", "null"]},
         "stop_price": {"type": "number", "minimum": 0},
         "status": {
           "type": "string",
@@ -123,7 +123,7 @@
       "items": {
         "type": "object",
         "properties": {
-          "binance_order_id": {"type": "string"},
+          "binance_order_id": {"type": ["string", "null"]},
           "price": {"type": "number", "minimum": 0},
           "quantity_pct": {"type": "number", "minimum": 0, "maximum": 1},
           "status": {

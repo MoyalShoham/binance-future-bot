@@ -92,7 +92,7 @@ execution:
   # Paper trading settings
   paper_trading:
     enabled: true
-    simulated_balance_usdt: 10000  # Simulated starting balance for paper trading
+    simulated_balance_usdt: 100000  # Simulated starting balance for paper trading
     base_slippage_bps: 5  # 5 basis points base slippage
     market_impact_model: "square_root"  # linear | square_root | custom
 
