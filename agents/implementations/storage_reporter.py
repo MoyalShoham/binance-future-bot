@@ -166,16 +166,17 @@ class StorageReporterAgent(BaseAgent):
     ) -> str:
         """Store research summary to database."""
 
+        # Serialize JSON fields to handle numpy types
         research_summary = ResearchSummary(
             id=research_data.get("research_id"),
             symbol=research_data["symbol"],
             timeframe=research_data["timeframe"],
             analysis_timestamp=datetime.fromisoformat(research_data["timestamp"]),
-            market_data=research_data.get("market_data", {}),
-            technical_indicators=research_data.get("technical_indicators", {}),
-            sentiment=research_data.get("sentiment", {}),
+            market_data=self._serialize_for_json(research_data.get("market_data", {})),
+            technical_indicators=self._serialize_for_json(research_data.get("technical_indicators", {})),
+            sentiment=self._serialize_for_json(research_data.get("sentiment", {})),
             market_regime=research_data.get("market_regime"),
-            news_events=research_data.get("news_events", []),
+            news_events=self._serialize_for_json(research_data.get("news_events", [])),
             warnings=research_data.get("warnings", []),
             time_decay_factor=research_data.get("time_decay_factor", 1.0)
         )
@@ -190,6 +191,7 @@ class StorageReporterAgent(BaseAgent):
     ) -> str:
         """Store trading decision to database."""
 
+        # Serialize JSON fields to handle numpy types
         trading_decision = TradingDecision(
             id=decision_data["decision_id"],
             research_summary_id=decision_data.get("research_summary_id"),
@@ -201,11 +203,11 @@ class StorageReporterAgent(BaseAgent):
             reasoning_summary=decision_data.get("reasoning_summary"),
             entry_price=decision_data.get("entry_price"),
             stop_loss=decision_data.get("stop_loss"),
-            take_profit_levels=decision_data.get("take_profit_levels", []),
+            take_profit_levels=self._serialize_for_json(decision_data.get("take_profit_levels", [])),
             position_size_usdt=decision_data.get("position_size_usdt"),
             leverage=decision_data.get("leverage"),
-            technical_signals=decision_data.get("technical_signals", {}),
-            risk_metrics=decision_data.get("risk_metrics", {}),
+            technical_signals=self._serialize_for_json(decision_data.get("technical_signals", {})),
+            risk_metrics=self._serialize_for_json(decision_data.get("risk_metrics", {})),
             timestamp=datetime.fromisoformat(decision_data["timestamp"]),
             research_summary_hash=decision_data.get("research_summary_hash")
         )
@@ -220,16 +222,17 @@ class StorageReporterAgent(BaseAgent):
     ) -> str:
         """Store risk approval to database."""
 
+        # Serialize JSON fields to handle numpy types
         risk_approval = RiskApproval(
             id=approval_data["approval_id"],
             decision_id=approval_data["decision_id"],
             approval_status=approval_data["approval_status"],
             rejection_reason=approval_data.get("rejection_reason"),
-            modified_parameters=approval_data.get("modified_parameters", {}),
-            risk_checks=approval_data.get("risk_checks", {}),
-            position_sizing=approval_data.get("position_sizing", {}),
-            account_status=approval_data.get("account_status", {}),
-            kill_switches=approval_data.get("kill_switches", {}),
+            modified_parameters=self._serialize_for_json(approval_data.get("modified_parameters", {})),
+            risk_checks=self._serialize_for_json(approval_data.get("risk_checks", {})),
+            position_sizing=self._serialize_for_json(approval_data.get("position_sizing", {})),
+            account_status=self._serialize_for_json(approval_data.get("account_status", {})),
+            kill_switches=self._serialize_for_json(approval_data.get("kill_switches", {})),
             timestamp=datetime.fromisoformat(approval_data["timestamp"]),
             processing_time_ms=approval_data.get("processing_time_ms")
         )
@@ -244,6 +247,7 @@ class StorageReporterAgent(BaseAgent):
     ) -> str:
         """Store execution result to database."""
 
+        # Serialize JSON fields to handle numpy types
         execution = Execution(
             id=execution_data["execution_id"],
             approval_id=execution_data["approval_id"],
@@ -252,12 +256,12 @@ class StorageReporterAgent(BaseAgent):
             execution_status=execution_data["execution_status"],
             symbol=execution_data["symbol"],
             side=execution_data["side"],
-            order_details=execution_data.get("order_details", {}),
-            stop_loss_order=execution_data.get("stop_loss_order"),
-            take_profit_orders=execution_data.get("take_profit_orders", []),
-            shadow_paper_execution=execution_data.get("shadow_paper_execution"),
-            paper_trading_simulation=execution_data.get("paper_trading_simulation"),
-            execution_timeline=execution_data.get("execution_timeline", []),
+            order_details=self._serialize_for_json(execution_data.get("order_details", {})),
+            stop_loss_order=self._serialize_for_json(execution_data.get("stop_loss_order")) if execution_data.get("stop_loss_order") else None,
+            take_profit_orders=self._serialize_for_json(execution_data.get("take_profit_orders", [])),
+            shadow_paper_execution=self._serialize_for_json(execution_data.get("shadow_paper_execution")) if execution_data.get("shadow_paper_execution") else None,
+            paper_trading_simulation=self._serialize_for_json(execution_data.get("paper_trading_simulation")) if execution_data.get("paper_trading_simulation") else None,
+            execution_timeline=self._serialize_for_json(execution_data.get("execution_timeline", [])),
             errors=execution_data.get("errors", []),
             timestamp=datetime.fromisoformat(execution_data["timestamp"]),
             processing_time_ms=execution_data.get("processing_time_ms"),
@@ -348,8 +352,25 @@ class StorageReporterAgent(BaseAgent):
         return hashlib.sha256(json_str.encode()).hexdigest()
 
     def _serialize_for_json(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Serialize data to be JSON-compatible (convert datetime objects to ISO strings)."""
-        return json.loads(json.dumps(data, default=str))
+        """Serialize data to be JSON-compatible (convert datetime, numpy types to native Python types)."""
+        import numpy as np
+
+        def convert_value(obj):
+            """Convert non-JSON-serializable objects to JSON-serializable ones."""
+            if isinstance(obj, (datetime, date)):
+                return obj.isoformat()
+            elif isinstance(obj, np.bool_):
+                return bool(obj)
+            elif isinstance(obj, np.integer):
+                return int(obj)
+            elif isinstance(obj, np.floating):
+                return float(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            else:
+                return str(obj)
+
+        return json.loads(json.dumps(data, default=convert_value))
 
     # ========== Reporting Methods ==========
 

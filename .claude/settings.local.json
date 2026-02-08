@@ -18,7 +18,10 @@
       "Bash(find:*)",
       "Bash(git remote set-head:*)",
       "Bash(git remote prune:*)",
-      "Bash(gh repo edit:*)"
+      "Bash(gh repo edit:*)",
+      "Bash(conda create:*)",
+      "Bash(./.conda/python.exe:*)",
+      "Bash(..condapython.exe main.py --mode paper --symbol BTCUSDT)"
     ]
   }
 }

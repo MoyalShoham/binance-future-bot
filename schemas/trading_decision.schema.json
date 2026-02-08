@@ -72,8 +72,8 @@
     },
     "model_used": {
       "type": "string",
-      "enum": ["gpt-4o-nano", "gemini-1.5-flash", "claude-3.5-haiku", "claude-3.7-sonnet"],
-      "description": "AI model used for reasoning"
+      "enum": ["rule-based", "gpt-4o-nano", "gemini-1.5-flash", "claude-3.5-haiku", "claude-3.7-sonnet"],
+      "description": "Model used for reasoning (rule-based for deterministic strategies, or AI model name)"
     },
     "reasoning_summary": {
       "type": "string",

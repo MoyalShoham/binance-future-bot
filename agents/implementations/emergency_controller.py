@@ -536,7 +536,9 @@ class SystemHealthMonitor:
 
         try:
             # Simple query to test connection
-            self.db_session.execute("SELECT 1")
+            from sqlalchemy import text
+            with self.db_session.session_scope() as session:
+                session.execute(text("SELECT 1"))
             return True
 
         except Exception as e:
