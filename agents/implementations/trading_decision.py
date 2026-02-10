@@ -80,7 +80,7 @@ class TradingDecisionAgent(BaseAgent):
         # Confidence threshold for trades
         self.min_confidence = 0.70  # Minimum 70% confidence to trade
 
-        logger.info(
+        logger.debug(
             "Trading Decision Agent initialized",
             agent_id=self.agent_id,
             enabled_strategies=self.enabled_strategies
@@ -99,7 +99,7 @@ class TradingDecisionAgent(BaseAgent):
         research_summary = state.get("research_summary")
         correlation_id = state.get("correlation_id", str(uuid.uuid4()))
 
-        logger.info(
+        logger.debug(
             "Trading Decision Agent started",
             correlation_id=correlation_id,
             symbol=research_summary.get("symbol") if research_summary else None
@@ -152,9 +152,9 @@ class TradingDecisionAgent(BaseAgent):
             )
 
             if llm_enhancement:
-                # Apply confidence adjustment (clamped: can lower more than raise)
+                # Apply confidence adjustment (symmetric range)
                 adj = llm_enhancement.get("confidence_adjustment", 0)
-                adj = max(-0.30, min(0.15, adj))  # Asymmetric: easier to suppress
+                adj = max(-0.15, min(0.15, adj))  # Symmetric: balanced adjustment
 
                 original_confidence = confidence
                 confidence = max(0.0, min(1.0, confidence + adj))
@@ -222,7 +222,7 @@ class TradingDecisionAgent(BaseAgent):
 
             processing_time = (datetime.utcnow() - start_time).total_seconds() * 1000
 
-            logger.info(
+            logger.debug(
                 "Trading Decision made",
                 correlation_id=correlation_id,
                 symbol=symbol,
@@ -537,7 +537,8 @@ class TradingDecisionAgent(BaseAgent):
         """
         Estimate initial position size (Risk Manager will validate/adjust).
 
-        Uses configured balance and risk per trade.
+        Uses configured balance, leverage, and risk per trade.
+        Caps notional position so required margin fits within account.
         """
         # Use simulated balance from config
         assumed_equity = self.config.get("execution", {}).get(
@@ -555,6 +556,12 @@ class TradingDecisionAgent(BaseAgent):
             position_size = risk_amount / stop_distance_pct
         else:
             position_size = assumed_equity * 0.5  # Default: 50% of equity
+
+        # Cap position size so margin fits within account (leverage-aware)
+        # max_notional = equity * leverage * utilization_factor
+        leverage = self.default_leverage
+        max_notional = assumed_equity * leverage * 0.80  # Use 80% of margin capacity
+        position_size = min(position_size, max_notional)
 
         return round(position_size, 2)
 
@@ -744,7 +751,7 @@ class TradingDecisionAgent(BaseAgent):
         if result and result.get("response"):
             response = result["response"]
             response["_model_used"] = result.get("model_used", "unknown")
-            logger.info(
+            logger.debug(
                 "LLM trading decision enhancement completed",
                 model=result.get("model_used"),
                 confidence_adjustment=response.get("confidence_adjustment"),

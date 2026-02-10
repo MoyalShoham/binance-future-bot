@@ -75,7 +75,7 @@ class ResearchCoordinatorAgent(BaseAgent):
         # Lookback periods for indicators
         self.lookback_periods = 100  # Number of candles for indicator calculation
 
-        logger.info(
+        logger.debug(
             "Research Coordinator Agent initialized",
             agent_id=self.agent_id,
             default_timeframe=self.default_timeframe
@@ -95,7 +95,7 @@ class ResearchCoordinatorAgent(BaseAgent):
         timeframe = state.get("timeframe", self.default_timeframe)
         correlation_id = state.get("correlation_id", str(uuid.uuid4()))
 
-        logger.info(
+        logger.debug(
             "Research Coordinator started",
             correlation_id=correlation_id,
             symbol=symbol,
@@ -180,7 +180,7 @@ class ResearchCoordinatorAgent(BaseAgent):
 
             processing_time = (datetime.utcnow() - start_time).total_seconds() * 1000
 
-            logger.info(
+            logger.debug(
                 "Research Coordinator completed",
                 correlation_id=correlation_id,
                 symbol=symbol,
@@ -510,7 +510,7 @@ class ResearchCoordinatorAgent(BaseAgent):
         if result and result.get("response"):
             response = result["response"]
             response["_model_used"] = result.get("model_used", "unknown")
-            logger.info(
+            logger.debug(
                 "LLM research enhancement completed",
                 model=result.get("model_used"),
                 llm_confidence=response.get("confidence"),

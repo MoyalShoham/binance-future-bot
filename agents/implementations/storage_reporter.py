@@ -48,7 +48,7 @@ class StorageReporterAgent(BaseAgent):
     ❌ Modify stored data (immutability)
     """
 
-    def __init__(self, agent_id: str, config: Dict[str, Any], db_session: DatabaseSession, model_router=None):
+    def __init__(self, agent_id: str, config: Dict[str, Any], db_session: DatabaseSession, model_router=None, trades_db=None):
         """
         Initialize Storage & Reporting Agent.
 
@@ -57,12 +57,14 @@ class StorageReporterAgent(BaseAgent):
             config: Agent configuration
             db_session: Database session instance
             model_router: Optional ModelRouter for LLM enhancement
+            trades_db: Optional TradesDB for flat trade records
         """
         super().__init__(agent_id, config, model_router=model_router)
         self.db_session = db_session
         self.queries = DatabaseQueries(db_session.get_session())
+        self.trades_db = trades_db
 
-        logger.info(
+        logger.debug(
             "Storage & Reporting Agent initialized",
             agent_id=self.agent_id
         )
@@ -77,7 +79,7 @@ class StorageReporterAgent(BaseAgent):
         Returns:
             Updated state with storage confirmation
         """
-        logger.info(
+        logger.debug(
             "Storage node started",
             correlation_id=state.get("correlation_id")
         )
@@ -94,7 +96,7 @@ class StorageReporterAgent(BaseAgent):
                         state["research_summary"],
                         session
                     )
-                    logger.info("Research summary stored", research_id=research_id)
+                    logger.debug("Research summary stored", research_id=research_id)
 
                 # Store trading decision if present
                 decision_id = None
@@ -103,7 +105,7 @@ class StorageReporterAgent(BaseAgent):
                         state["trading_decision"],
                         session
                     )
-                    logger.info("Trading decision stored", decision_id=decision_id)
+                    logger.debug("Trading decision stored", decision_id=decision_id)
 
                 # Store risk approval if present
                 approval_id = None
@@ -112,7 +114,7 @@ class StorageReporterAgent(BaseAgent):
                         state["risk_approval"],
                         session
                     )
-                    logger.info("Risk approval stored", approval_id=approval_id)
+                    logger.debug("Risk approval stored", approval_id=approval_id)
 
                 # Store execution result if present
                 execution_id = None
@@ -121,11 +123,44 @@ class StorageReporterAgent(BaseAgent):
                         state["execution_result"],
                         session
                     )
-                    logger.info("Execution result stored", execution_id=execution_id)
+                    logger.debug("Execution result stored", execution_id=execution_id)
 
                     # Update P&L if execution was successful
                     if state["execution_result"].get("execution_status") in ("FILLED", "PARTIALLY_FILLED"):
                         self._update_pnl(state["execution_result"], session)
+
+                        # Record in flat trades DB
+                        if self.trades_db:
+                            td = state.get("trading_decision") or {}
+                            od = state["execution_result"].get("order_details", {})
+                            self.trades_db.record_open(
+                                trade_id=state["execution_result"]["execution_id"],
+                                symbol=state["execution_result"]["symbol"],
+                                side=state["execution_result"]["side"],
+                                entry_price=od.get("avg_fill_price", 0),
+                                quantity=od.get("filled_quantity", 0),
+                                leverage=od.get("leverage", 1),
+                                strategy=td.get("strategy_id"),
+                                confidence=td.get("confidence"),
+                                fees_usdt=od.get("commission_usdt", 0),
+                                correlation_id=state.get("correlation_id"),
+                                decision_id=td.get("decision_id"),
+                                execution_id=state["execution_result"]["execution_id"],
+                            )
+
+                    elif state["execution_result"].get("execution_status") == "REJECTED":
+                        # Record rejected trade in flat trades DB
+                        if self.trades_db:
+                            td = state.get("trading_decision") or {}
+                            self.trades_db.record_rejected(
+                                trade_id=state["execution_result"]["execution_id"],
+                                symbol=state["execution_result"]["symbol"],
+                                side=state["execution_result"]["side"],
+                                strategy=td.get("strategy_id"),
+                                confidence=td.get("confidence"),
+                                correlation_id=state.get("correlation_id"),
+                                decision_id=td.get("decision_id"),
+                            )
 
                 # Store audit trail entry
                 self._store_audit_entry(
@@ -147,7 +182,7 @@ class StorageReporterAgent(BaseAgent):
 
             processing_time = (datetime.utcnow() - start_time).total_seconds() * 1000
 
-            logger.info(
+            logger.debug(
                 "Storage node completed",
                 correlation_id=state.get("correlation_id"),
                 processing_time_ms=processing_time
@@ -303,7 +338,7 @@ class StorageReporterAgent(BaseAgent):
 
         session.add(pnl_entry)
 
-        logger.info(
+        logger.debug(
             "P&L entry created",
             execution_id=execution_data["execution_id"],
             symbol=execution_data["symbol"],
@@ -623,9 +658,9 @@ class StorageReporterAgent(BaseAgent):
         from prompts.storage_reporter import STORAGE_REPORTER_SYSTEM
 
         # Build a concise context (avoid sending the entire state to save tokens)
-        trading_decision = state.get("trading_decision", {})
-        execution_result = state.get("execution_result", {})
-        research_summary = state.get("research_summary", {})
+        trading_decision = state.get("trading_decision") or {}
+        execution_result = state.get("execution_result") or {}
+        research_summary = state.get("research_summary") or {}
 
         context_data = {
             "symbol": state.get("symbol"),
@@ -650,7 +685,7 @@ class StorageReporterAgent(BaseAgent):
         )
 
         if result and result.get("response"):
-            logger.info("LLM cycle analysis generated", model=result.get("model_used"))
+            logger.debug("LLM cycle analysis generated", model=result.get("model_used"))
             return result["response"]
 
         return None

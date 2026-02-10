@@ -12,10 +12,14 @@ import json
 from typing import Dict, Any, Optional, Tuple
 from enum import Enum
 import structlog
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from langchain_anthropic import ChatAnthropic
 from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_ollama import ChatOllama
 from langchain_core.messages import SystemMessage, HumanMessage
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
@@ -36,14 +40,16 @@ class TaskType(str, Enum):
 
 class ModelTier(str, Enum):
     """Model tiers ordered by cost (low to high)."""
+    OLLAMA = "ollama-local"
     NANO = "gpt-4o-mini"
-    FLASH = "gemini-2.0-flash"
+    FLASH = "gemini-2.5-flash"
     HAIKU = "claude-3-5-haiku-20241022"
     SONNET = "claude-sonnet-4-20250514"
 
 
 # Map tier to provider for display
 TIER_PROVIDER = {
+    ModelTier.OLLAMA: "ollama",
     ModelTier.NANO: "openai",
     ModelTier.FLASH: "google",
     ModelTier.HAIKU: "anthropic",
@@ -61,6 +67,7 @@ class ModelRouter:
 
     # Model configuration: cost per 1K tokens (input)
     MODEL_COSTS = {
+        ModelTier.OLLAMA: 0.0,  # Free - local inference
         ModelTier.NANO: 0.00015,
         ModelTier.FLASH: 0.000075,
         ModelTier.HAIKU: 0.0008,
@@ -118,7 +125,7 @@ class ModelRouter:
         # Cache model instances to avoid re-creating on every call
         self._model_cache: Dict[ModelTier, Any] = {}
 
-        logger.info(
+        logger.debug(
             "ModelRouter initialized",
             enabled=self.enabled,
             primary_provider=self.primary_provider,
@@ -131,7 +138,17 @@ class ModelRouter:
             return self._model_cache[tier]
 
         model = None
-        if tier == ModelTier.HAIKU:
+        if tier == ModelTier.OLLAMA:
+            ollama_model = self.config.get("ollama_model", "qwen2.5:7b")
+            ollama_base_url = self.config.get("ollama_base_url", "http://localhost:11434")
+            model = ChatOllama(
+                model=ollama_model,
+                base_url=ollama_base_url,
+                temperature=0.1,
+                num_predict=2048,
+                format="json",
+            )
+        elif tier == ModelTier.HAIKU:
             api_key = os.getenv("ANTHROPIC_API_KEY")
             if not api_key:
                 raise ValueError("ANTHROPIC_API_KEY not set")
@@ -169,10 +186,11 @@ class ModelRouter:
             if not api_key:
                 raise ValueError("GOOGLE_API_KEY not set")
             model = ChatGoogleGenerativeAI(
-                model="gemini-2.0-flash",
+                model="gemini-2.5-flash",
                 google_api_key=api_key,
                 temperature=0.1,
-                max_output_tokens=2048,
+                max_output_tokens=8192,
+                disable_streaming=True,
             )
 
         if model is None:
@@ -182,8 +200,11 @@ class ModelRouter:
         return model
 
     def _parse_json_response(self, content: str) -> Optional[Dict[str, Any]]:
-        """Parse JSON from LLM response, stripping markdown fences if present."""
+        """Parse JSON from LLM response, stripping think tags and markdown fences."""
         text = content.strip()
+
+        # Strip DeepSeek-R1 <think>...</think> reasoning blocks
+        text = re.sub(r'<think>[\s\S]*?</think>', '', text).strip()
 
         # Strip markdown code fences
         if text.startswith("```"):
@@ -257,9 +278,16 @@ class ModelRouter:
         if force_model:
             return force_model
 
+        # If primary is ollama, route everything locally
+        if self.primary_provider == "ollama":
+            return ModelTier.OLLAMA
+
+        # If primary is google, route everything to Flash
+        if self.primary_provider == "google":
+            return ModelTier.FLASH
+
         # If primary is anthropic, bias towards Haiku for most tasks
         if self.primary_provider == "anthropic":
-            # Override NANO/FLASH to HAIKU for anthropic-primary config
             default = self.TASK_DEFAULT_MODELS.get(task_type, ModelTier.HAIKU)
             if default in (ModelTier.NANO, ModelTier.FLASH):
                 return ModelTier.HAIKU

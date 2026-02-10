@@ -31,10 +31,11 @@ class TrailingStopMonitor:
     - BREAKEVEN_STOP: Price returned to entry after initially moving in profit
     """
 
-    def __init__(self, binance_client, db_session: DatabaseSession, config: Dict[str, Any]):
+    def __init__(self, binance_client, db_session: DatabaseSession, config: Dict[str, Any], trades_db=None):
         self.binance_client = binance_client
         self.db_session = db_session
         self.config = config
+        self.trades_db = trades_db
 
         # Trailing stop config
         ts_config = config.get("trailing_stop", {})
@@ -61,7 +62,7 @@ class TrailingStopMonitor:
         self.closing_in_progress = set()  # prevent race conditions
 
         # Symbol rules for quantity rounding (reuse from OrderExecutor)
-        self.SYMBOL_RULES = OrderExecutor.SYMBOL_RULES
+        self.SYMBOL_RULES = OrderExecutor.FALLBACK_SYMBOL_RULES
         self.DEFAULT_RULES = OrderExecutor.DEFAULT_RULES
 
         logger.info(
@@ -93,7 +94,7 @@ class TrailingStopMonitor:
                     self.position_states.clear()
                     return
 
-                logger.info("Trailing stop monitoring", open_positions=len(open_positions))
+                logger.debug("Trailing stop monitoring", open_positions=len(open_positions))
 
                 for position in open_positions:
                     try:
@@ -128,6 +129,17 @@ class TrailingStopMonitor:
 
         # Double-check it's still open
         if position.is_closed:
+            return
+
+        # Skip positions with zero quantity (stale DB entries)
+        if not position.quantity or position.quantity <= 0:
+            logger.warning(
+                "Skipping position with zero quantity, marking closed",
+                position_id=pos_id,
+                symbol=position.symbol,
+            )
+            position.is_closed = True
+            session.commit()
             return
 
         # Fetch current price
@@ -326,6 +338,20 @@ class TrailingStopMonitor:
             position.is_closed = True
 
             session.flush()
+
+            # Record close in flat trades DB
+            if self.trades_db and position.execution_id:
+                try:
+                    self.trades_db.record_close(
+                        execution_id=position.execution_id,
+                        exit_price=exit_price,
+                        pnl_usdt=round(realized_pnl, 6),
+                        fees_usdt=round(total_fees, 6),
+                        holding_time_seconds=holding_seconds,
+                        close_reason=reason,
+                    )
+                except Exception as e:
+                    logger.warning("Failed to record trade close in trades_db", error=str(e))
 
             logger.info(
                 "Position closed",

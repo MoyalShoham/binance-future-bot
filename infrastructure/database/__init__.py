@@ -16,6 +16,7 @@ from .models import (
 )
 from .session import DatabaseSession, init_database
 from .queries import DatabaseQueries
+from .trades_db import TradesDB, Trade
 
 __all__ = [
     # Models
@@ -33,5 +34,9 @@ __all__ = [
     "init_database",
 
     # Queries
-    "DatabaseQueries"
+    "DatabaseQueries",
+
+    # Trades DB (flat, queryable)
+    "TradesDB",
+    "Trade",
 ]

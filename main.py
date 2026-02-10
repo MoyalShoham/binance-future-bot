@@ -24,7 +24,7 @@ from agents.implementations import (
     EmergencyControllerAgent,
 )
 from infrastructure.binance_api import BinanceFuturesClient
-from infrastructure.database import init_database
+from infrastructure.database import init_database, TradesDB
 
 # Ensure logs directory exists
 os.makedirs("logs", exist_ok=True)
@@ -32,7 +32,7 @@ os.makedirs("logs", exist_ok=True)
 # Set root logging level to INFO so structlog filter_by_level works correctly
 # Configure both console and file output
 root_logger = logging.getLogger()
-root_logger.setLevel(logging.INFO)
+root_logger.setLevel(logging.DEBUG)
 
 # Console handler
 console_handler = logging.StreamHandler(sys.stderr)
@@ -48,7 +48,7 @@ file_handler = RotatingFileHandler(
     backupCount=10,
     encoding="utf-8"
 )
-file_handler.setLevel(logging.INFO)
+file_handler.setLevel(logging.DEBUG)
 file_handler.setFormatter(logging.Formatter("%(message)s"))
 root_logger.addHandler(file_handler)
 
@@ -136,7 +136,7 @@ def initialize_binance_client(config: dict) -> BinanceFuturesClient:
     return client
 
 
-def initialize_agents(config: dict, binance_client: BinanceFuturesClient, db_session, model_router: ModelRouter) -> dict:
+def initialize_agents(config: dict, binance_client: BinanceFuturesClient, db_session, model_router: ModelRouter, trades_db=None) -> dict:
     """
     Initialize all trading agents.
 
@@ -145,6 +145,7 @@ def initialize_agents(config: dict, binance_client: BinanceFuturesClient, db_ses
         binance_client: Binance API client
         db_session: Database session instance
         model_router: ModelRouter instance for LLM calls
+        trades_db: Optional TradesDB for flat trade records
 
     Returns:
         Dict of initialized agents
@@ -154,8 +155,8 @@ def initialize_agents(config: dict, binance_client: BinanceFuturesClient, db_ses
         "trading_decision": TradingDecisionAgent("trading-decision", config, model_router=model_router),
         "risk_manager": RiskManagerAgent("risk-manager", config, binance_client, db_session),  # NO model_router - stays rule-based
         "execution_agent": ExecutionAgent("execution-agent", config, binance_client, db_session, model_router=model_router),
-        "storage_reporter": StorageReporterAgent("storage-reporter", config, db_session, model_router=model_router),
-        "emergency_controller": EmergencyControllerAgent("emergency-controller", config, binance_client, db_session, model_router=model_router),
+        "storage_reporter": StorageReporterAgent("storage-reporter", config, db_session, model_router=model_router, trades_db=trades_db),
+        "emergency_controller": EmergencyControllerAgent("emergency-controller", config, binance_client, db_session, model_router=model_router, trades_db=trades_db),
     }
 
     logger.info("Agents initialized", agent_count=len(agents), llm_enabled=config.get("models", {}).get("enabled", True))
@@ -175,11 +176,8 @@ def run_single_cycle(
         symbol: Trading symbol
         mode: Execution mode
     """
-    logger.info(
-        "Starting trading cycle",
-        symbol=symbol,
-        mode=mode
-    )
+    import time as _time
+    _cycle_start = _time.monotonic()
 
     try:
         final_state = coordinator.run_trading_cycle(symbol=symbol, mode=mode)
@@ -189,19 +187,34 @@ def run_single_cycle(
             logger.error("Trading cycle returned None state")
             return
 
-        # Log results
+        # Build concise CYCLE summary line
         trading_decision = final_state.get("trading_decision") or {}
         execution_result = final_state.get("execution_result") or {}
+        decision = trading_decision.get("decision", "UNKNOWN")
+        confidence = trading_decision.get("confidence", 0)
+        strategy = trading_decision.get("strategy_id", "none")
+        elapsed_ms = int((_time.monotonic() - _cycle_start) * 1000)
+        errors = final_state.get("errors", [])
 
-        logger.info(
-            "Trading cycle completed",
-            correlation_id=final_state.get("correlation_id"),
-            pipeline_stage=final_state.get("pipeline_stage"),
-            decision=trading_decision.get("decision"),
-            execution_status=execution_result.get("execution_status"),
-            total_time_ms=final_state.get("total_processing_time_ms"),
-            errors=len(final_state.get("errors", []))
-        )
+        if errors:
+            logger.warning(
+                "CYCLE",
+                symbol=symbol,
+                decision=decision,
+                confidence=f"{confidence:.0%}",
+                strategy=strategy,
+                time=f"{elapsed_ms}ms",
+                errors=len(errors),
+            )
+        else:
+            logger.info(
+                "CYCLE",
+                symbol=symbol,
+                decision=decision,
+                confidence=f"{confidence:.0%}",
+                strategy=strategy,
+                time=f"{elapsed_ms}ms",
+            )
 
     except Exception as e:
         logger.error("Trading cycle failed", error=str(e), exc_info=True)
@@ -263,6 +276,9 @@ def main():
         db_session = init_database(config)
         logger.info("Database initialized successfully")
 
+        # Initialize flat trades database
+        trades_db = TradesDB("data/trades.db")
+
         # Initialize Binance client
         binance_client = initialize_binance_client(config)
 
@@ -270,7 +286,7 @@ def main():
         model_router = ModelRouter(config.get("models", {}))
 
         # Initialize agents
-        agents = initialize_agents(config, binance_client, db_session, model_router)
+        agents = initialize_agents(config, binance_client, db_session, model_router, trades_db)
 
         # Initialize coordinator
         coordinator = TradingCoordinator(config)
@@ -317,10 +333,13 @@ def main():
         if 'emergency_controller' in locals() and emergency_controller:
             emergency_controller.stop_continuous_monitoring()
 
-        # Close database connection
+        # Close database connections
+        if 'trades_db' in locals() and trades_db:
+            trades_db.close()
+
         if 'db_session' in locals() and db_session:
             db_session.close()
-            logger.info("Database connection closed")
+            logger.info("Database connections closed")
 
         logger.info("System shutdown complete")
 

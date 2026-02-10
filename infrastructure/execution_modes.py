@@ -41,14 +41,14 @@ class OrderExecutor:
     - Idempotent order submission to prevent duplicates
     """
 
-    # Binance Futures minimum quantity and step sizes for common symbols
-    SYMBOL_RULES = {
+    # Fallback rules (used if Binance API is unavailable)
+    FALLBACK_SYMBOL_RULES = {
         "XRPUSDT": {"min_qty": 0.1, "step_size": 0.1, "min_notional": 5.0},
         "LINKUSDT": {"min_qty": 0.01, "step_size": 0.01, "min_notional": 5.0},
         "DOGEUSDT": {"min_qty": 1, "step_size": 1, "min_notional": 5.0},
         "1000SHIBUSDT": {"min_qty": 1, "step_size": 1, "min_notional": 5.0},
         "1000FLOKIUSDT": {"min_qty": 1, "step_size": 1, "min_notional": 5.0},
-        "ADAUSDT": {"min_qty": 0.1, "step_size": 0.1, "min_notional": 5.0},
+        "ADAUSDT": {"min_qty": 1, "step_size": 1, "min_notional": 5.0},
         "DOTUSDT": {"min_qty": 0.1, "step_size": 0.1, "min_notional": 5.0},
         "AVAXUSDT": {"min_qty": 0.1, "step_size": 0.1, "min_notional": 5.0},
         "BTCUSDT": {"min_qty": 0.001, "step_size": 0.001, "min_notional": 5.0},
@@ -84,7 +84,37 @@ class OrderExecutor:
             "alert_on_divergence": config.get("hybrid", {}).get("alert_on_divergence", True)
         }
 
+        # Load real symbol rules from Binance API, fallback to hardcoded
+        self.SYMBOL_RULES = dict(self.FALLBACK_SYMBOL_RULES)
+        self._load_exchange_info()
+
         logger.info("OrderExecutor initialized", mode=config.get("execution_mode"))
+
+    def _load_exchange_info(self):
+        """Fetch real symbol precision rules from Binance at startup."""
+        try:
+            configured_symbols = self.config.get("trading", {}).get("symbols", [])
+            if not configured_symbols:
+                configured_symbols = list(self.FALLBACK_SYMBOL_RULES.keys())
+
+            exchange_rules = self.binance_client.get_symbol_info(configured_symbols)
+
+            for symbol, rules in exchange_rules.items():
+                self.SYMBOL_RULES[symbol] = {
+                    "min_qty": rules["min_qty"],
+                    "step_size": rules["step_size"],
+                    "min_notional": rules["min_notional"],
+                }
+
+            logger.info(
+                "Exchange info loaded from Binance API",
+                symbols_updated=len(exchange_rules)
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to load exchange info, using fallback rules",
+                error=str(e)
+            )
 
     def execute_trade(
         self,

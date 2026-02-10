@@ -73,7 +73,7 @@
     },
     "model_used": {
       "type": "string",
-      "enum": ["rule-based", "gpt-4o-mini", "gemini-2.0-flash", "claude-3-5-haiku-20241022", "claude-sonnet-4-20250514"],
+      "enum": ["rule-based", "ollama-local", "gpt-4o-mini", "gemini-2.5-flash", "claude-3-5-haiku-20241022", "claude-sonnet-4-20250514"],
       "description": "Model used for reasoning (rule-based for deterministic strategies, or AI model name)"
     },
     "reasoning_summary": {

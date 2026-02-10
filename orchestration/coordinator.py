@@ -59,7 +59,7 @@ class TradingCoordinator:
             agent_instance: Agent instance
         """
         self.agents[agent_name] = agent_instance
-        logger.info("Agent registered", agent_name=agent_name)
+        logger.debug("Agent registered", agent_name=agent_name)
 
     def _build_execution_graph(self) -> StateGraph:
         """
@@ -112,7 +112,7 @@ class TradingCoordinator:
         Gathers market data, news, sentiment, and technical indicators.
         """
         start_time = datetime.utcnow()
-        logger.info("Research node started", correlation_id=state["correlation_id"])
+        logger.debug("Research node started", correlation_id=state["correlation_id"])
 
         try:
             # Call Research Coordinator agent
@@ -129,7 +129,7 @@ class TradingCoordinator:
                 (datetime.utcnow() - start_time).total_seconds() * 1000
             )
 
-            logger.info("Research node completed", correlation_id=state["correlation_id"])
+            logger.debug("Research node completed", correlation_id=state["correlation_id"])
 
         except Exception as e:
             logger.error("Research node failed", error=str(e), correlation_id=state["correlation_id"])
@@ -150,7 +150,7 @@ class TradingCoordinator:
         Analyzes research and decides whether to trade (LONG/SHORT/NO_TRADE).
         """
         start_time = datetime.utcnow()
-        logger.info("Decision node started", correlation_id=state["correlation_id"])
+        logger.debug("Decision node started", correlation_id=state["correlation_id"])
 
         try:
             # Call Trading Decision agent
@@ -165,7 +165,7 @@ class TradingCoordinator:
             # Check if NO_TRADE decision
             if trading_decision.get("decision") == "NO_TRADE":
                 state["should_trade"] = False
-                logger.info("NO_TRADE decision made", correlation_id=state["correlation_id"])
+                logger.debug("NO_TRADE decision made", correlation_id=state["correlation_id"])
 
             state = self.state_manager.update_stage(
                 state,
@@ -173,7 +173,7 @@ class TradingCoordinator:
                 (datetime.utcnow() - start_time).total_seconds() * 1000
             )
 
-            logger.info(
+            logger.debug(
                 "Decision node completed",
                 decision=trading_decision.get("decision"),
                 confidence=trading_decision.get("confidence"),
@@ -199,12 +199,12 @@ class TradingCoordinator:
         Validates trade against risk limits. Has authority to approve/reject/modify.
         """
         start_time = datetime.utcnow()
-        logger.info("Risk check node started", correlation_id=state["correlation_id"])
+        logger.debug("Risk check node started", correlation_id=state["correlation_id"])
 
         try:
             # If NO_TRADE or errors, skip risk check
             if not state["should_trade"] or state["errors"]:
-                logger.info("Skipping risk check (no trade or errors)", correlation_id=state["correlation_id"])
+                logger.debug("Skipping risk check (no trade or errors)", correlation_id=state["correlation_id"])
                 state = self.state_manager.update_stage(
                     state,
                     "risk_evaluated",
@@ -237,7 +237,7 @@ class TradingCoordinator:
                 (datetime.utcnow() - start_time).total_seconds() * 1000
             )
 
-            logger.info(
+            logger.debug(
                 "Risk check node completed",
                 approval_status=approval_status,
                 correlation_id=state["correlation_id"]
@@ -262,7 +262,7 @@ class TradingCoordinator:
         Places orders via Binance API (paper/live/hybrid mode).
         """
         start_time = datetime.utcnow()
-        logger.info("Execution node started", correlation_id=state["correlation_id"])
+        logger.debug("Execution node started", correlation_id=state["correlation_id"])
 
         try:
             # Call Execution agent
@@ -280,7 +280,7 @@ class TradingCoordinator:
                 (datetime.utcnow() - start_time).total_seconds() * 1000
             )
 
-            logger.info(
+            logger.debug(
                 "Execution node completed",
                 status=execution_result.get("execution_status"),
                 mode=execution_result.get("execution_mode"),
@@ -306,7 +306,7 @@ class TradingCoordinator:
         Persists all pipeline data to database and generates reports.
         """
         start_time = datetime.utcnow()
-        logger.info("Storage node started", correlation_id=state["correlation_id"])
+        logger.debug("Storage node started", correlation_id=state["correlation_id"])
 
         try:
             # Call Storage & Reporting agent
@@ -327,7 +327,7 @@ class TradingCoordinator:
             # Mark pipeline complete
             state = self.state_manager.mark_complete(state)
 
-            logger.info("Storage node completed", correlation_id=state["correlation_id"])
+            logger.debug("Storage node completed", correlation_id=state["correlation_id"])
 
         except Exception as e:
             logger.error("Storage node failed", error=str(e), correlation_id=state["correlation_id"])
@@ -352,12 +352,12 @@ class TradingCoordinator:
         """
         # Check for errors
         if state["errors"]:
-            logger.info("Routing to store (errors)", correlation_id=state["correlation_id"])
+            logger.debug("Routing to store (errors)", correlation_id=state["correlation_id"])
             return "error"
 
         # Check if trading should proceed
         if not state["should_trade"]:
-            logger.info("Routing to store (no trade)", correlation_id=state["correlation_id"])
+            logger.debug("Routing to store (no trade)", correlation_id=state["correlation_id"])
             return "rejected"
 
         # Check risk approval status
@@ -365,13 +365,13 @@ class TradingCoordinator:
         approval_status = risk_approval.get("approval_status", "REJECTED")
 
         if approval_status == "APPROVED":
-            logger.info("Routing to execute (approved)", correlation_id=state["correlation_id"])
+            logger.debug("Routing to execute (approved)", correlation_id=state["correlation_id"])
             return "approved"
         elif approval_status == "MODIFIED":
-            logger.info("Routing to execute (modified)", correlation_id=state["correlation_id"])
+            logger.debug("Routing to execute (modified)", correlation_id=state["correlation_id"])
             return "modified"
         else:
-            logger.info("Routing to store (rejected)", correlation_id=state["correlation_id"])
+            logger.debug("Routing to store (rejected)", correlation_id=state["correlation_id"])
             return "rejected"
 
     # ========== Main Execution Methods ==========
@@ -393,7 +393,7 @@ class TradingCoordinator:
         """
         correlation_id = str(uuid.uuid4())
 
-        logger.info(
+        logger.debug(
             "Starting trading cycle",
             symbol=symbol,
             mode=mode,
@@ -411,7 +411,7 @@ class TradingCoordinator:
         try:
             final_state = self.graph.invoke(initial_state)
 
-            logger.info(
+            logger.debug(
                 "Trading cycle completed",
                 correlation_id=correlation_id,
                 stage=final_state["pipeline_stage"],

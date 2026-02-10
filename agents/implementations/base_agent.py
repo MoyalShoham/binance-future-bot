@@ -55,7 +55,7 @@ class BaseAgent(ABC):
             and agent_llm_config.get(config_key, True)
         )
 
-        self.logger.info("Agent initialized", llm_enabled=self.llm_enabled)
+        self.logger.debug("Agent initialized", llm_enabled=self.llm_enabled)
 
     @abstractmethod
     def execute(self, state: Dict[str, Any]) -> Dict[str, Any]:

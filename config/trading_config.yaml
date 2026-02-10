@@ -66,7 +66,9 @@ risk:
 models:
   enabled: true                      # Master switch for LLM calls
   routing_strategy: "cheap_first"    # Route to cheapest model first
-  primary_provider: "anthropic"      # Use Claude as primary (all tasks route to Haiku/Sonnet)
+  primary_provider: "ollama"         # Use local Ollama for all AI calls (free + private)
+  ollama_model: "qwen2.5:14b"       # Reliable reasoning, fits 16GB VRAM (5070 Ti)
+  ollama_base_url: "http://localhost:11434"
 
   # Per-agent LLM toggle
   agent_llm_enabled:
@@ -100,7 +102,7 @@ models:
       cost: 0.00015
       use_for: ["classification", "simple_reasoning"]
 
-    - name: "gemini-2.0-flash"
+    - name: "gemini-3.0-flash"
       cost: 0.000075
       use_for: ["pattern_matching", "sentiment_analysis"]
 

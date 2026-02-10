@@ -17,6 +17,8 @@ STRUCTURED_OUTPUT_INSTRUCTION = """
 ## Output Format
 You MUST respond with valid JSON only. No markdown, no explanations outside the JSON.
 Do not wrap your response in ```json``` code fences. Return raw JSON only.
+Keep string values concise (under 200 characters each). Do NOT write long paragraphs.
+Your entire response must be under 1500 characters total.
 """
 
 CONFIDENCE_SCORING_INSTRUCTION = """

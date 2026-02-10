@@ -77,7 +77,7 @@ class ExecutionAgent(BaseAgent):
         self.place_take_profit = config.get("execution", {}).get("place_take_profit", True)
         self.max_retry_attempts = config.get("execution", {}).get("max_retry_attempts", 3)
 
-        logger.info(
+        logger.debug(
             "Execution Agent initialized",
             agent_id=self.agent_id,
             place_stop_loss=self.place_stop_loss,
@@ -97,7 +97,7 @@ class ExecutionAgent(BaseAgent):
         correlation_id = state.get("correlation_id", str(uuid.uuid4()))
         start_time = datetime.utcnow()
 
-        logger.info(
+        logger.debug(
             "Execution Agent started",
             correlation_id=correlation_id
         )
@@ -124,7 +124,7 @@ class ExecutionAgent(BaseAgent):
                     "Trade rejected by Risk Manager"
                 )
 
-                logger.info(
+                logger.debug(
                     "Execution skipped - trade rejected",
                     correlation_id=correlation_id,
                     rejection_reason=risk_approval.get("rejection_reason")
@@ -178,7 +178,7 @@ class ExecutionAgent(BaseAgent):
                 logger.error("Execution result failed schema validation")
                 raise ValueError("Execution result does not conform to schema")
 
-            logger.info(
+            logger.debug(
                 "Execution Agent completed",
                 correlation_id=correlation_id,
                 execution_status=execution_result["execution_status"],

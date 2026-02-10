@@ -106,7 +106,7 @@ class RiskManagerAgent(BaseAgent):
         paper_config = config.get("execution", {}).get("paper_trading", {})
         simulated_balance_config = paper_config.get("simulated_balance_usdt", 0)
 
-        logger.info(
+        logger.debug(
             "Risk Manager Agent initialized (GLOBAL AUTHORITY)",
             agent_id=self.agent_id,
             max_risk_per_trade_pct=self.max_risk_per_trade_pct,
@@ -125,7 +125,7 @@ class RiskManagerAgent(BaseAgent):
         Returns:
             risk_approval object (APPROVED/REJECTED/MODIFIED)
         """
-        logger.info(
+        logger.debug(
             "Risk Manager evaluation started",
             correlation_id=state.get("correlation_id")
         )
@@ -182,7 +182,7 @@ class RiskManagerAgent(BaseAgent):
             )
 
             # Log decision
-            logger.info(
+            logger.debug(
                 "Risk Manager decision",
                 correlation_id=state.get("correlation_id"),
                 approval_status=approval_status,
@@ -795,7 +795,7 @@ class RiskManagerAgent(BaseAgent):
                 warning_failures
             )
 
-            logger.info(
+            logger.debug(
                 "Trade MODIFIED - Risk parameters adjusted",
                 symbol=trading_decision.get("symbol"),
                 modifications=list(modified_params.keys())
@@ -803,7 +803,7 @@ class RiskManagerAgent(BaseAgent):
             return ("MODIFIED", modified_params)
 
         # APPROVE - all checks passed
-        logger.info(
+        logger.debug(
             "Trade APPROVED - All risk checks passed",
             symbol=trading_decision.get("symbol")
         )
@@ -838,6 +838,14 @@ class RiskManagerAgent(BaseAgent):
         for check_name, check_result in warning_failures:
             if check_name == "leverage_limit":
                 modified_params["leverage"] = int(check_result.get("limit", 1))
+
+        # Cap position size so margin fits within available balance
+        leverage = modified_params.get("leverage", trading_decision.get("leverage", 1))
+        available = account_status.get("available_balance", 0)
+        final_size = modified_params.get("position_size_usdt", requested_size)
+        max_notional = available * leverage * 0.80  # Use 80% of margin capacity
+        if final_size > max_notional and max_notional > 0:
+            modified_params["position_size_usdt"] = round(max_notional, 2)
 
         return modified_params
 

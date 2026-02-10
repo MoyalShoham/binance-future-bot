@@ -407,6 +407,51 @@ class BinanceFuturesClient:
             self.logger.error("Failed to change leverage", symbol=symbol, error=str(e))
             raise
 
+    # ========== Exchange Info ==========
+
+    def get_symbol_info(self, symbols: List[str] = None) -> Dict[str, Dict[str, Any]]:
+        """
+        Get exchange info for symbols (precision, step size, min notional).
+
+        Args:
+            symbols: List of symbols to query (None = all)
+
+        Returns:
+            Dict mapping symbol -> {min_qty, step_size, min_notional, price_precision}
+        """
+        try:
+            exchange_info = self.client.futures_exchange_info()
+            result = {}
+
+            for sym_info in exchange_info.get('symbols', []):
+                symbol = sym_info['symbol']
+                if symbols and symbol not in symbols:
+                    continue
+
+                filters = {f['filterType']: f for f in sym_info.get('filters', [])}
+
+                lot_size = filters.get('LOT_SIZE', {})
+                min_notional = filters.get('MIN_NOTIONAL', {})
+                price_filter = filters.get('PRICE_FILTER', {})
+
+                step_size = float(lot_size.get('stepSize', 0.001))
+                min_qty = float(lot_size.get('minQty', 0.001))
+
+                result[symbol] = {
+                    "min_qty": min_qty,
+                    "step_size": step_size,
+                    "min_notional": float(min_notional.get('notional', 5.0)),
+                    "price_precision": int(sym_info.get('pricePrecision', 2)),
+                    "quantity_precision": int(sym_info.get('quantityPrecision', 3)),
+                }
+
+            self.logger.info("Exchange info loaded", symbols_count=len(result))
+            return result
+
+        except BinanceAPIException as e:
+            self.logger.error("Failed to get exchange info", error=str(e))
+            raise
+
     # ========== Utility ==========
 
     def ping(self) -> bool:
