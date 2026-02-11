@@ -229,27 +229,28 @@ class EmergencyControllerAgent(BaseAgent):
     def _monitoring_loop(self):
         """Main monitoring loop (runs in background thread).
 
-        Runs trailing stop checks every 10 seconds and health checks every 60 seconds.
+        Runs trailing stop checks every check_interval_seconds (default 5s)
+        and health checks every 60 seconds.
         """
         logger.info("Monitoring loop started")
         health_check_counter = 0
+        check_interval = self.config.get("trailing_stop", {}).get("check_interval_seconds", 5)
+        health_check_every = max(1, 60 // check_interval)  # health check every ~60s
 
         while self.monitoring_active:
             try:
-                # Run trailing stop check every 10 seconds
                 self.trailing_stop_monitor.check_all_positions()
 
-                # Run health checks every 60 seconds (every 6th iteration)
                 health_check_counter += 1
-                if health_check_counter >= 6:
+                if health_check_counter >= health_check_every:
                     self._perform_health_checks()
                     health_check_counter = 0
 
-                time.sleep(10)
+                time.sleep(check_interval)
 
             except Exception as e:
                 logger.error("Monitoring loop error", error=str(e), exc_info=True)
-                time.sleep(10)
+                time.sleep(check_interval)
 
         logger.info("Monitoring loop exited")
 

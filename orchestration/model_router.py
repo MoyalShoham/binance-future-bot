@@ -115,6 +115,7 @@ class ModelRouter:
         timeouts = self.config.get("timeouts", {})
         self._haiku_timeout = timeouts.get("haiku_seconds", 15)
         self._sonnet_timeout = timeouts.get("sonnet_seconds", 30)
+        self._ollama_timeout = timeouts.get("ollama_seconds", 30)
 
         # Track model usage statistics
         self.usage_stats = {
@@ -147,6 +148,7 @@ class ModelRouter:
                 temperature=0.1,
                 num_predict=2048,
                 format="json",
+                timeout=self._ollama_timeout,
             )
         elif tier == ModelTier.HAIKU:
             api_key = os.getenv("ANTHROPIC_API_KEY")

@@ -75,7 +75,7 @@ models:
     research_coordinator: true
     trading_decision: true
     execution_agent: false           # Start disabled (advisory only)
-    storage_reporter: true
+    storage_reporter: false          # No LLM needed for trade logging
     emergency_controller: true
     risk_manager: false              # ALWAYS false - rule-based only for safety
 
@@ -83,6 +83,7 @@ models:
   timeouts:
     haiku_seconds: 15
     sonnet_seconds: 30
+    ollama_seconds: 30               # Timeout for local Ollama inference
 
   # Cost controls
   cost_limits:
@@ -223,7 +224,7 @@ strategies:
 # Trailing Stop Configuration
 trailing_stop:
   enabled: true
-  check_interval_seconds: 10
+  check_interval_seconds: 5
 
   # Trail activation: only start trailing after position moves this % in profit
   activation_threshold_pct: 0.002  # 0.2%

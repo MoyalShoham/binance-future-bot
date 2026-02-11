@@ -6,6 +6,7 @@ Produces normalized Research Summary JSON for Trading Decision Agent.
 """
 
 from typing import Dict, Any, Optional, List
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 import uuid
 import structlog
@@ -105,11 +106,8 @@ class ResearchCoordinatorAgent(BaseAgent):
         start_time = datetime.utcnow()
 
         try:
-            # Step 1: Fetch market data from Binance
-            market_data = self._fetch_market_data(symbol, timeframe)
-
-            # Step 2: Calculate technical indicators
-            technical_indicators = self._calculate_technical_indicators(symbol, timeframe)
+            # Step 1+2: Fetch market data and klines in parallel
+            market_data, technical_indicators = self._fetch_all_data(symbol, timeframe)
 
             # Step 3: Analyze sentiment (simplified - can be enhanced with external APIs)
             sentiment = self._analyze_sentiment(symbol, market_data)
@@ -203,108 +201,79 @@ class ResearchCoordinatorAgent(BaseAgent):
 
     # ========== DATA COLLECTION ==========
 
-    def _fetch_market_data(
+    def _fetch_all_data(
         self,
         symbol: str,
         timeframe: str
-    ) -> Dict[str, Any]:
+    ) -> tuple:
         """
-        Fetch current market data from Binance.
+        Fetch market data and klines in parallel using ThreadPoolExecutor.
+
+        Runs all 5 Binance API calls concurrently instead of sequentially,
+        reducing data collection time from ~1-2s to ~300-400ms.
 
         Returns:
-            Dict with price, volume, funding rate, order book
+            Tuple of (market_data dict, technical_indicators dict)
         """
         try:
-            # Get current ticker data
-            ticker = self.binance_client.client.futures_ticker(symbol=symbol)
+            with ThreadPoolExecutor(max_workers=5) as pool:
+                ticker_fut = pool.submit(
+                    self.binance_client.client.futures_ticker, symbol=symbol
+                )
+                funding_fut = pool.submit(
+                    self.binance_client.client.futures_funding_rate, symbol=symbol, limit=1
+                )
+                oi_fut = pool.submit(
+                    self.binance_client.client.futures_open_interest, symbol=symbol
+                )
+                book_fut = pool.submit(
+                    self.binance_client.get_order_book, symbol, limit=10
+                )
+                klines_fut = pool.submit(
+                    self.binance_client.get_klines,
+                    symbol=symbol, interval=timeframe, limit=self.lookback_periods
+                )
 
-            # Get 24h volume
-            volume_24h = float(ticker.get("quoteVolume", 0))
+            # Collect results (all futures completed after exiting the `with` block)
+            ticker = ticker_fut.result()
+            funding_rate_data = funding_fut.result()
+            open_interest_data = oi_fut.result()
+            order_book_data = book_fut.result()
+            klines = klines_fut.result()
 
-            # Get current price
+            # Build market data
             current_price = float(ticker.get("lastPrice", 0))
-
-            # Get 24h price change
-            price_change_24h = float(ticker.get("priceChangePercent", 0)) / 100
-
-            # Get funding rate
-            funding_rate_data = self.binance_client.client.futures_funding_rate(
-                symbol=symbol,
-                limit=1
-            )
-            funding_rate = float(funding_rate_data[0].get("fundingRate", 0)) if funding_rate_data else 0
-
-            # Get open interest
-            open_interest_data = self.binance_client.client.futures_open_interest(symbol=symbol)
-            open_interest = float(open_interest_data.get("openInterest", 0)) * current_price
-
-            # Get order book
-            order_book_data = self.binance_client.get_order_book(symbol, limit=10)
-
             market_data = {
                 "price": current_price,
-                "volume_24h": volume_24h,
-                "price_change_24h_pct": price_change_24h,
-                "funding_rate": funding_rate,
-                "open_interest": open_interest,
-                "order_book": order_book_data
+                "volume_24h": float(ticker.get("quoteVolume", 0)),
+                "price_change_24h_pct": float(ticker.get("priceChangePercent", 0)) / 100,
+                "funding_rate": float(funding_rate_data[0].get("fundingRate", 0)) if funding_rate_data else 0,
+                "open_interest": float(open_interest_data.get("openInterest", 0)) * current_price,
+                "order_book": order_book_data,
             }
 
+            # Build technical indicators from klines
+            if klines and len(klines) >= 50:
+                kline_price = float(klines[-1]["close"])
+                technical_indicators = self.indicators.calculate_all(klines, kline_price)
+            else:
+                logger.warning(f"Insufficient kline data for {symbol}")
+                technical_indicators = self._get_default_indicators()
+
             logger.debug(
-                "Market data fetched",
+                "Market data fetched (parallel)",
                 symbol=symbol,
                 price=current_price,
-                volume_24h=volume_24h,
-                funding_rate=funding_rate
+                volume_24h=market_data["volume_24h"],
+                funding_rate=market_data["funding_rate"],
+                rsi=technical_indicators.get("rsi"),
             )
 
-            return market_data
+            return market_data, technical_indicators
 
         except Exception as e:
             logger.error(f"Failed to fetch market data: {e}")
             raise
-
-    def _calculate_technical_indicators(
-        self,
-        symbol: str,
-        timeframe: str
-    ) -> Dict[str, Any]:
-        """
-        Calculate technical indicators using historical price data.
-
-        Returns:
-            Dict with EMA, RSI, MACD, ATR, volatility, etc.
-        """
-        try:
-            # Fetch historical klines
-            klines = self.binance_client.get_klines(
-                symbol=symbol,
-                interval=timeframe,
-                limit=self.lookback_periods
-            )
-
-            if not klines or len(klines) < 50:
-                logger.warning(f"Insufficient kline data for {symbol}")
-                return self._get_default_indicators()
-
-            # Get current price
-            current_price = float(klines[-1]["close"])
-
-            # Calculate all indicators
-            indicators = self.indicators.calculate_all(klines, current_price)
-
-            logger.debug(
-                "Technical indicators calculated",
-                symbol=symbol,
-                rsi=indicators.get("rsi"),
-                volatility_pct=indicators.get("volatility_pct")
-            )
-
-            return indicators
-
-        except Exception as e:
-            logger.error(f"Failed to calculate technical indicators: {e}")
-            return self._get_default_indicators()
 
     def _get_default_indicators(self) -> Dict[str, Any]:
         """Return default indicators when calculation fails."""

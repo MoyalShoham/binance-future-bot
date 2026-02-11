@@ -245,24 +245,23 @@ class TrailingStopMonitor:
             return
 
     def _get_hard_stop(self, position: PnLLedger, session) -> Optional[float]:
-        """Get the hard stop loss price from the original TradingDecision."""
+        """Get the hard stop loss price from the original TradingDecision.
+
+        Uses a single JOIN query instead of 2 separate queries to reduce DB load.
+        """
         try:
             if not position.execution_id:
                 return None
 
-            execution = session.query(Execution).filter(
-                Execution.id == position.execution_id
-            ).first()
+            result = (
+                session.query(TradingDecision.stop_loss)
+                .join(Execution, Execution.decision_id == TradingDecision.id)
+                .filter(Execution.id == position.execution_id)
+                .first()
+            )
 
-            if not execution:
-                return None
-
-            decision = session.query(TradingDecision).filter(
-                TradingDecision.id == execution.decision_id
-            ).first()
-
-            if decision and decision.stop_loss:
-                return decision.stop_loss
+            if result and result[0]:
+                return result[0]
 
             return None
         except Exception as e:
