@@ -41,7 +41,7 @@ class Trade(TradesBase):
     fees_usdt = Column(Float)
     holding_time_seconds = Column(Integer)
     status = Column(String, nullable=False, index=True)  # OPEN / CLOSED / REJECTED
-    close_reason = Column(String)  # TRAIL_STOP / HARD_STOP / TIME_EXIT / BREAKEVEN_STOP
+    close_reason = Column(String)  # STOP_LOSS / TIME_EXIT
     correlation_id = Column(String, index=True)
     decision_id = Column(String)
     execution_id = Column(String)
