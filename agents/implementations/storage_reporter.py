@@ -322,6 +322,17 @@ class StorageReporterAgent(BaseAgent):
 
         order_details = execution_data.get("order_details", {})
 
+        # Extract SL/TP order IDs if present
+        sl_order = execution_data.get("stop_loss_order") or {}
+        tp_orders = execution_data.get("take_profit_orders") or []
+        sl_order_id = sl_order.get("binance_order_id") if sl_order.get("status") == "PLACED" else None
+        tp_order_id = None
+        if tp_orders:
+            for tp in tp_orders:
+                if tp.get("status") == "PLACED" and tp.get("binance_order_id"):
+                    tp_order_id = tp["binance_order_id"]
+                    break
+
         # Create new P&L entry for the position
         pnl_entry = PnLLedger(
             execution_id=execution_data["execution_id"],
@@ -333,7 +344,9 @@ class StorageReporterAgent(BaseAgent):
             entry_time=datetime.fromisoformat(execution_data["timestamp"]),
             fees_usdt=order_details.get("commission_usdt", 0.0),
             unrealized_pnl_usdt=0.0,
-            is_closed=False
+            is_closed=False,
+            sl_order_id=sl_order_id,
+            tp_order_id=tp_order_id,
         )
 
         session.add(pnl_entry)
@@ -343,7 +356,9 @@ class StorageReporterAgent(BaseAgent):
             execution_id=execution_data["execution_id"],
             symbol=execution_data["symbol"],
             side=execution_data["side"],
-            entry_price=pnl_entry.entry_price
+            entry_price=pnl_entry.entry_price,
+            sl_order_id=sl_order_id,
+            tp_order_id=tp_order_id,
         )
 
     def _store_audit_entry(

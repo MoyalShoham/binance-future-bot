@@ -169,13 +169,14 @@ class TradesDB:
             trade.close_reason = close_reason
             trade.status = "CLOSED"
 
-        logger.info(
-            "Trade closed",
-            trade_id=trade.trade_id,
-            symbol=trade.symbol,
-            pnl_usdt=pnl_usdt,
-            reason=close_reason,
-        )
+            # Log inside session scope — trade is detached after session closes
+            logger.info(
+                "Trade closed",
+                trade_id=trade.trade_id,
+                symbol=trade.symbol,
+                pnl_usdt=pnl_usdt,
+                reason=close_reason,
+            )
 
     def close(self):
         """Dispose of engine connections."""

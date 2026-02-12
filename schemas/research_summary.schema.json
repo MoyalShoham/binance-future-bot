@@ -88,18 +88,33 @@
             "bid_depth": {
               "type": "number",
               "minimum": 0,
-              "description": "Total bid volume (top 10 levels)"
+              "description": "Total bid volume"
             },
             "ask_depth": {
               "type": "number",
               "minimum": 0,
-              "description": "Total ask volume (top 10 levels)"
+              "description": "Total ask volume"
             },
             "imbalance_ratio": {
               "type": "number",
               "minimum": -1,
               "maximum": 1,
               "description": "Order book imbalance (-1 to 1, positive = bullish)"
+            },
+            "best_bid": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Best bid price"
+            },
+            "best_ask": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Best ask price"
+            },
+            "spread_bps": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Bid-ask spread in basis points"
             }
           }
         }

@@ -4,7 +4,7 @@ Database Session Management
 Handles database connections and session lifecycle.
 """
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event, text, inspect
 from sqlalchemy.orm import sessionmaker, scoped_session
 from contextlib import contextmanager
 import structlog
@@ -40,6 +40,16 @@ class DatabaseSession:
             pool_pre_ping=True,  # Verify connections before using
             pool_recycle=3600   # Recycle connections every hour
         )
+
+        # Enable WAL mode for SQLite to handle concurrent reads/writes
+        # (Emergency Controller writes from background thread)
+        if database_url.startswith("sqlite"):
+            @event.listens_for(self.engine, "connect")
+            def set_sqlite_pragma(dbapi_conn, connection_record):
+                cursor = dbapi_conn.cursor()
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA busy_timeout=5000")  # 5s retry on lock
+                cursor.close()
 
         self.session_factory = sessionmaker(bind=self.engine)
         self.Session = scoped_session(self.session_factory)
@@ -139,9 +149,33 @@ def init_database(config: dict = None) -> DatabaseSession:
     # Create tables if they don't exist
     _db_session.create_tables()
 
+    # Migrate: add new columns to pnl_ledger if they don't exist
+    _run_pnl_ledger_migration(_db_session.engine)
+
     logger.info("Global database initialized", type=db_type)
 
     return _db_session
+
+
+def _run_pnl_ledger_migration(engine):
+    """Add sl_order_id, tp_order_id, close_reason columns to pnl_ledger if missing."""
+    inspector = inspect(engine)
+    if "pnl_ledger" not in inspector.get_table_names():
+        return
+
+    existing_columns = {col["name"] for col in inspector.get_columns("pnl_ledger")}
+    migrations = {
+        "sl_order_id": "ALTER TABLE pnl_ledger ADD COLUMN sl_order_id VARCHAR(50)",
+        "tp_order_id": "ALTER TABLE pnl_ledger ADD COLUMN tp_order_id VARCHAR(50)",
+        "close_reason": "ALTER TABLE pnl_ledger ADD COLUMN close_reason VARCHAR(30)",
+    }
+
+    with engine.connect() as conn:
+        for col_name, ddl in migrations.items():
+            if col_name not in existing_columns:
+                conn.execute(text(ddl))
+                logger.info("Migration: added column", table="pnl_ledger", column=col_name)
+        conn.commit()
 
 
 def get_db() -> DatabaseSession:

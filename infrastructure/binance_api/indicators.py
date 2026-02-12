@@ -5,7 +5,9 @@ Calculates technical indicators using TA library.
 """
 
 from typing import Dict, Any, List
+from datetime import datetime, timezone
 import pandas as pd
+import numpy as np
 import ta
 import structlog
 
@@ -52,9 +54,22 @@ class TechnicalIndicators:
         indicators["ema_21"] = round(ta.trend.ema_indicator(df["Close"], window=21).iloc[-1], 2)
         indicators["ema_50"] = round(ta.trend.ema_indicator(df["Close"], window=50).iloc[-1], 2)
 
-        # VWAP (approximation using typical price)
-        typical_price = (df["High"] + df["Low"] + df["Close"]) / 3
-        indicators["vwap"] = round((typical_price * df["Volume"]).sum() / df["Volume"].sum(), 2)
+        # VWAP — reset daily at 00:00 UTC (institutional standard)
+        # Filter klines to only current UTC day, then compute cumulative VWAP
+        if "timestamp" in df.columns:
+            df["_dt"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+            today_utc = datetime.now(timezone.utc).date()
+            today_mask = df["_dt"].dt.date == today_utc
+            if today_mask.any():
+                day_df = df.loc[today_mask]
+            else:
+                # If no candles from today (e.g. very long timeframes), use last 20 candles
+                day_df = df.tail(20)
+        else:
+            day_df = df.tail(20)
+        typical_price = (day_df["High"] + day_df["Low"] + day_df["Close"]) / 3
+        vol_sum = day_df["Volume"].sum()
+        indicators["vwap"] = round((typical_price * day_df["Volume"]).sum() / vol_sum, 2) if vol_sum > 0 else round(df["Close"].iloc[-1], 2)
 
         # RSI
         indicators["rsi"] = round(ta.momentum.rsi(df["Close"], window=14).iloc[-1], 2)
@@ -67,20 +82,47 @@ class TechnicalIndicators:
             "histogram": round(macd.macd_diff().iloc[-1], 2)
         }
 
-        # ATR (Average True Range)
+        # ATR (Average True Range) - use 6 decimal places to avoid rounding to 0 for low-price coins
         indicators["atr"] = round(ta.volatility.average_true_range(
             df["High"],
             df["Low"],
             df["Close"],
             window=14
-        ).iloc[-1], 2)
+        ).iloc[-1], 6)
 
-        # Volatility (standard deviation of returns)
-        returns = df["Close"].pct_change()
-        volatility_pct = round(returns.std() * 100, 2)
-        indicators["volatility_pct"] = volatility_pct
+        # Volatility — normalized to hourly equivalent for consistent threshold comparison
+        # Per-candle std is meaningless without knowing timeframe, so we annualize to hourly.
+        # Detect candle interval from timestamps (ms); fallback to 5 min.
+        returns = df["Close"].pct_change().dropna()
+        per_candle_std = float(returns.std()) if len(returns) > 1 else 0.0
+        candle_minutes = 5  # default
+        if "timestamp" in df.columns and len(df) >= 2:
+            delta_ms = float(df["timestamp"].iloc[-1] - df["timestamp"].iloc[-2])
+            candle_minutes = max(1, delta_ms / 60000)
+        candles_per_hour = 60.0 / candle_minutes
+        # Scale: hourly vol = per_candle_vol * sqrt(candles_per_hour)
+        hourly_volatility_pct = round(per_candle_std * np.sqrt(candles_per_hour), 6)
+        indicators["volatility_pct"] = hourly_volatility_pct
 
-        logger.debug("Technical indicators calculated", ema_9=indicators["ema_9"], rsi=indicators["rsi"])
+        # Relative volume: current candle volume vs 20-candle average
+        if len(df) >= 21:
+            avg_vol_20 = df["Volume"].iloc[-21:-1].mean()
+            current_vol = df["Volume"].iloc[-1]
+            indicators["relative_volume"] = round(current_vol / avg_vol_20, 2) if avg_vol_20 > 0 else 1.0
+        else:
+            indicators["relative_volume"] = 1.0
+
+        # Previous candle EMAs for crossover detection
+        if len(df) >= 3:
+            ema9_series = ta.trend.ema_indicator(df["Close"], window=9)
+            ema21_series = ta.trend.ema_indicator(df["Close"], window=21)
+            indicators["prev_ema_9"] = round(ema9_series.iloc[-2], 2)
+            indicators["prev_ema_21"] = round(ema21_series.iloc[-2], 2)
+        else:
+            indicators["prev_ema_9"] = indicators["ema_9"]
+            indicators["prev_ema_21"] = indicators["ema_21"]
+
+        logger.debug("Technical indicators calculated", ema_9=indicators["ema_9"], rsi=indicators["rsi"], hourly_vol=hourly_volatility_pct)
 
         return indicators
 

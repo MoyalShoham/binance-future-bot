@@ -148,21 +148,24 @@ class ExecutionAgent(BaseAgent):
             # If execution successful, place protective orders
             if execution_result["execution_status"] in [ExecutionStatus.FILLED, ExecutionStatus.PARTIALLY_FILLED]:
 
-                # Place stop loss order
-                if self.place_stop_loss and mode != ExecutionMode.PAPER:
-                    stop_loss_result = self._place_stop_loss_order(
-                        execution_result,
-                        trading_decision
-                    )
-                    execution_result["stop_loss_order"] = stop_loss_result
+                if mode == ExecutionMode.PAPER:
+                    logger.info("Paper mode: skipping Binance-side SL/TP orders")
+                else:
+                    # Place stop loss order
+                    if self.place_stop_loss:
+                        stop_loss_result = self._place_stop_loss_order(
+                            execution_result,
+                            trading_decision
+                        )
+                        execution_result["stop_loss_order"] = stop_loss_result
 
-                # Place take profit orders
-                if self.place_take_profit and mode != ExecutionMode.PAPER:
-                    take_profit_results = self._place_take_profit_orders(
-                        execution_result,
-                        trading_decision
-                    )
-                    execution_result["take_profit_orders"] = take_profit_results
+                    # Place take profit order
+                    if self.place_take_profit:
+                        take_profit_results = self._place_take_profit_orders(
+                            execution_result,
+                            trading_decision
+                        )
+                        execution_result["take_profit_orders"] = take_profit_results
 
             processing_time_ms = (datetime.utcnow() - start_time).total_seconds() * 1000
             execution_result["processing_time_ms"] = processing_time_ms
@@ -258,13 +261,21 @@ class ExecutionAgent(BaseAgent):
 
     # ========== PROTECTIVE ORDERS ==========
 
+    def _round_price(self, symbol: str, price: float) -> float:
+        """Round price to symbol's price precision."""
+        rules = self.order_executor.SYMBOL_RULES.get(
+            symbol, self.order_executor.DEFAULT_RULES
+        )
+        precision = rules.get("price_precision", 2)
+        return round(price, precision)
+
     def _place_stop_loss_order(
         self,
         execution_result: Dict[str, Any],
         trading_decision: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        Place stop loss order to protect position.
+        Place stop loss order (STOP_MARKET with closePosition) to protect position.
 
         Args:
             execution_result: Entry execution result
@@ -273,11 +284,10 @@ class ExecutionAgent(BaseAgent):
         Returns:
             Stop loss order result
         """
+        stop_price = trading_decision.get("stop_loss")
         try:
             symbol = execution_result["symbol"]
             side = execution_result["side"]
-            quantity = execution_result["order_details"]["filled_quantity"]
-            stop_price = trading_decision.get("stop_loss")
 
             if not stop_price:
                 logger.warning("No stop loss price defined, skipping")
@@ -290,26 +300,30 @@ class ExecutionAgent(BaseAgent):
             # Determine order side (opposite of entry)
             stop_side = "SELL" if side == "LONG" else "BUY"
 
-            # Place STOP_MARKET order
-            stop_order = self.binance_client.create_order(
+            # Round stop price to symbol's price precision
+            stop_price = self._round_price(symbol, stop_price)
+
+            # Place STOP_MARKET algo order with closePosition (closes entire position)
+            stop_order = self.binance_client.create_algo_order(
                 symbol=symbol,
                 side=stop_side,
                 order_type="STOP_MARKET",
-                quantity=quantity,
-                stop_price=stop_price
+                trigger_price=stop_price,
+                close_position=True,
             )
 
             logger.info(
-                "Stop loss order placed",
+                "Stop loss algo order placed",
                 symbol=symbol,
                 stop_price=stop_price,
-                order_id=stop_order["orderId"]
+                algo_id=stop_order.get("algoId")
             )
 
             return {
-                "binance_order_id": str(stop_order["orderId"]),
+                "binance_order_id": str(stop_order.get("algoId", "")),
                 "stop_price": stop_price,
-                "status": "PLACED"
+                "status": "PLACED",
+                "is_algo_order": True
             }
 
         except Exception as e:
@@ -330,21 +344,19 @@ class ExecutionAgent(BaseAgent):
         trading_decision: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
         """
-        Place take profit orders at multiple levels.
+        Place a single take profit order (TAKE_PROFIT_MARKET with closePosition)
+        at the first TP level. Uses closePosition to close the entire position.
 
         Args:
             execution_result: Entry execution result
             trading_decision: Original trading decision
 
         Returns:
-            List of take profit order results
+            List with single take profit order result
         """
-        take_profit_orders = []
-
         try:
             symbol = execution_result["symbol"]
             side = execution_result["side"]
-            filled_quantity = execution_result["order_details"]["filled_quantity"]
 
             take_profit_levels = trading_decision.get("take_profit_levels", [])
 
@@ -352,61 +364,50 @@ class ExecutionAgent(BaseAgent):
                 logger.warning("No take profit levels defined, skipping")
                 return []
 
+            # Use first TP level for the single closePosition order
+            tp_price = take_profit_levels[0]["price"]
+
+            # Round TP price to symbol's price precision
+            tp_price = self._round_price(symbol, tp_price)
+
             # Determine order side (opposite of entry)
             tp_side = "SELL" if side == "LONG" else "BUY"
 
-            for tp_level in take_profit_levels:
-                tp_price = tp_level["price"]
-                quantity_pct = tp_level["quantity_pct"]
-                tp_quantity = filled_quantity * quantity_pct
+            tp_order = self.binance_client.create_algo_order(
+                symbol=symbol,
+                side=tp_side,
+                order_type="TAKE_PROFIT_MARKET",
+                trigger_price=tp_price,
+                close_position=True,
+            )
 
-                try:
-                    # Place TAKE_PROFIT_MARKET order
-                    tp_order = self.binance_client.create_order(
-                        symbol=symbol,
-                        side=tp_side,
-                        order_type="TAKE_PROFIT_MARKET",
-                        quantity=round(tp_quantity, 3),
-                        stop_price=tp_price
-                    )
+            logger.info(
+                "Take profit algo order placed",
+                symbol=symbol,
+                price=tp_price,
+                algo_id=tp_order.get("algoId")
+            )
 
-                    logger.info(
-                        "Take profit order placed",
-                        symbol=symbol,
-                        price=tp_price,
-                        quantity_pct=quantity_pct,
-                        order_id=tp_order["orderId"]
-                    )
-
-                    take_profit_orders.append({
-                        "binance_order_id": str(tp_order["orderId"]),
-                        "price": tp_price,
-                        "quantity_pct": quantity_pct,
-                        "status": "PLACED"
-                    })
-
-                except Exception as e:
-                    logger.error(
-                        "Failed to place take profit order",
-                        price=tp_price,
-                        error=str(e)
-                    )
-                    take_profit_orders.append({
-                        "binance_order_id": None,
-                        "price": tp_price,
-                        "quantity_pct": quantity_pct,
-                        "status": "FAILED"
-                    })
-
-            return take_profit_orders
+            return [{
+                "binance_order_id": str(tp_order.get("algoId", "")),
+                "price": tp_price,
+                "quantity_pct": 1.0,
+                "status": "PLACED",
+                "is_algo_order": True
+            }]
 
         except Exception as e:
             logger.error(
-                "Failed to place take profit orders",
+                "Failed to place take profit order",
                 symbol=execution_result["symbol"],
                 error=str(e)
             )
-            return []
+            return [{
+                "binance_order_id": None,
+                "price": take_profit_levels[0]["price"] if take_profit_levels else None,
+                "quantity_pct": 1.0,
+                "status": "FAILED"
+            }]
 
     # ========== ERROR HANDLING ==========
 

@@ -25,6 +25,7 @@ from agents.implementations import (
 )
 from infrastructure.binance_api import BinanceFuturesClient
 from infrastructure.database import init_database, TradesDB
+from infrastructure.symbol_scanner import SymbolScanner
 
 # Ensure logs directory exists
 os.makedirs("logs", exist_ok=True)
@@ -152,7 +153,7 @@ def initialize_agents(config: dict, binance_client: BinanceFuturesClient, db_ses
     """
     agents = {
         "research_coordinator": ResearchCoordinatorAgent("research-coordinator", config, binance_client, model_router=model_router),
-        "trading_decision": TradingDecisionAgent("trading-decision", config, model_router=model_router),
+        "trading_decision": TradingDecisionAgent("trading-decision", config, model_router=model_router, binance_client=binance_client),
         "risk_manager": RiskManagerAgent("risk-manager", config, binance_client, db_session),  # NO model_router - stays rule-based
         "execution_agent": ExecutionAgent("execution-agent", config, binance_client, db_session, model_router=model_router),
         "storage_reporter": StorageReporterAgent("storage-reporter", config, db_session, model_router=model_router, trades_db=trades_db),
@@ -301,13 +302,33 @@ def main():
         if emergency_controller:
             emergency_controller.start_continuous_monitoring()
 
+        # Initialize hot symbol scanner
+        symbol_scanner = SymbolScanner(binance_client, config)
+
         # Determine symbols to trade
         if args.symbol.lower() == "all":
-            symbols = config.get("trading", {}).get("symbols", ["XRPUSDT"])
+            # Use scanner if enabled, else fall back to config list
+            if symbol_scanner.enabled:
+                symbols = symbol_scanner.scan()
+                if not symbols:
+                    symbols = config.get("trading", {}).get("symbols", ["XRPUSDT"])
+            else:
+                symbols = config.get("trading", {}).get("symbols", ["XRPUSDT"])
         else:
             symbols = [args.symbol]
 
-        logger.info("Trading symbols", symbols=symbols)
+        # Always include symbols with open positions (prevents orphaned trades)
+        try:
+            open_pos_symbols = {p["symbol"] for p in binance_client.get_positions()}
+            if open_pos_symbols:
+                for s in open_pos_symbols:
+                    if s not in symbols:
+                        symbols.append(s)
+                        logger.info("Added open-position symbol to watch list", symbol=s)
+        except Exception as e:
+            logger.warning("Could not fetch open positions for symbol list", error=str(e))
+
+        logger.info("Trading symbols", symbols=symbols, count=len(symbols))
 
         # Run trading cycles
         if args.continuous:
@@ -317,6 +338,21 @@ def main():
             while True:
                 for symbol in symbols:
                     run_single_cycle(coordinator, symbol, execution_mode)
+
+                # Re-scan for hot symbols each round
+                if args.symbol.lower() == "all" and symbol_scanner.enabled:
+                    new_symbols = symbol_scanner.scan()
+                    if new_symbols:
+                        symbols = new_symbols
+                    # Always keep symbols with open positions in the list
+                    try:
+                        open_pos_symbols = {p["symbol"] for p in binance_client.get_positions()}
+                        for s in open_pos_symbols:
+                            if s not in symbols:
+                                symbols.append(s)
+                    except Exception:
+                        pass
+
                 time.sleep(args.interval)
         else:
             # Single cycle across all symbols

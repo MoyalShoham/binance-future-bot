@@ -102,6 +102,14 @@ class RiskManagerAgent(BaseAgent):
         self.vol_breaker_trigger_pct = vol_breaker.get("trigger_pct", 0.10)
         self.vol_breaker_cooldown_seconds = vol_breaker.get("cooldown_seconds", 300)
 
+        # Funding rate filter
+        self.max_funding_rate_pct = risk_config.get("max_funding_rate_pct", 0.0005)
+
+        # Consecutive loss cooldown
+        cooldown_config = risk_config.get("consecutive_loss_cooldown", {})
+        self.max_consecutive_losses = cooldown_config.get("max_losses", 3)
+        self.loss_lookback_minutes = cooldown_config.get("lookback_minutes", 30)
+
         # Check paper trading config
         paper_config = config.get("execution", {}).get("paper_trading", {})
         simulated_balance_config = paper_config.get("simulated_balance_usdt", 0)
@@ -270,6 +278,17 @@ class RiskManagerAgent(BaseAgent):
 
         # Check 10: Duplicate Position (same symbol already open on Binance)
         risk_checks["duplicate_position"] = self._check_duplicate_position(
+            trading_decision.get("symbol")
+        )
+
+        # Check 11: Funding Rate Filter (block trades that pay expensive funding)
+        risk_checks["funding_rate"] = self._check_funding_rate(
+            trading_decision,
+            research_summary
+        )
+
+        # Check 12: Consecutive Loss Cooldown
+        risk_checks["consecutive_loss_cooldown"] = self._check_consecutive_losses(
             trading_decision.get("symbol")
         )
 
@@ -559,12 +578,13 @@ class RiskManagerAgent(BaseAgent):
                 "message": f"No existing position on {symbol}"
             }
         except Exception as e:
-            logger.warning("Failed to check duplicate positions", error=str(e))
+            logger.warning("Failed to check duplicate positions — BLOCKING trade for safety", error=str(e))
             return {
-                "passed": True,
+                "passed": False,
                 "current_value": 0,
                 "limit": 0,
-                "message": "Could not verify positions (allowing trade)"
+                "severity": "critical",
+                "message": f"Could not verify positions on Binance (API error: {str(e)[:80]}) — rejecting to prevent duplicates"
             }
 
     def _check_available_margin(
@@ -593,6 +613,82 @@ class RiskManagerAgent(BaseAgent):
                 else f"Sufficient margin ({required_margin:.2f} / {available_balance:.2f} USDT)"
             )
         }
+
+    def _check_funding_rate(
+        self,
+        trading_decision: Dict[str, Any],
+        research_summary: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Check 11: Block trades that would pay high funding rates.
+        LONGs blocked when funding > threshold (you pay shorts).
+        SHORTs blocked when funding < -threshold (you pay longs).
+        """
+        if not research_summary:
+            return {"passed": True, "current_value": 0, "limit": self.max_funding_rate_pct,
+                    "message": "No research data — funding check skipped"}
+
+        funding_rate = research_summary.get("market_data", {}).get("funding_rate", 0)
+        decision = trading_decision.get("decision", "NO_TRADE")
+
+        # LONG pays funding when rate is positive
+        if decision == "LONG" and funding_rate > self.max_funding_rate_pct:
+            return {
+                "passed": False,
+                "current_value": funding_rate,
+                "limit": self.max_funding_rate_pct,
+                "severity": "warning",
+                "message": f"LONG blocked: funding rate {funding_rate:.4%} > {self.max_funding_rate_pct:.4%} (you'd pay shorts)"
+            }
+
+        # SHORT pays funding when rate is negative
+        if decision == "SHORT" and funding_rate < -self.max_funding_rate_pct:
+            return {
+                "passed": False,
+                "current_value": funding_rate,
+                "limit": -self.max_funding_rate_pct,
+                "severity": "warning",
+                "message": f"SHORT blocked: funding rate {funding_rate:.4%} < -{self.max_funding_rate_pct:.4%} (you'd pay longs)"
+            }
+
+        return {
+            "passed": True,
+            "current_value": funding_rate,
+            "limit": self.max_funding_rate_pct,
+            "message": f"Funding rate OK: {funding_rate:.4%}"
+        }
+
+    def _check_consecutive_losses(self, symbol: str) -> Dict[str, Any]:
+        """Check 12: Block trading if too many consecutive losses on this symbol."""
+        try:
+            with self.db_session.session_scope() as session:
+                self.queries.session = session
+                consecutive = self.queries.get_consecutive_losses(
+                    symbol, self.loss_lookback_minutes
+                )
+
+            if consecutive >= self.max_consecutive_losses:
+                return {
+                    "passed": False,
+                    "current_value": consecutive,
+                    "limit": self.max_consecutive_losses,
+                    "severity": "warning",
+                    "message": f"{consecutive} consecutive losses on {symbol} in last {self.loss_lookback_minutes}min — cooling down"
+                }
+
+            return {
+                "passed": True,
+                "current_value": consecutive,
+                "limit": self.max_consecutive_losses,
+                "message": f"Loss streak OK ({consecutive} / {self.max_consecutive_losses} max)"
+            }
+        except Exception as e:
+            logger.warning("Failed to check consecutive losses", symbol=symbol, error=str(e))
+            return {
+                "passed": True,
+                "current_value": 0,
+                "limit": self.max_consecutive_losses,
+                "message": "Could not check loss streak (allowing trade)"
+            }
 
     # ========== POSITION SIZING ==========
 
@@ -635,12 +731,30 @@ class RiskManagerAgent(BaseAgent):
         research_summary: Optional[Dict[str, Any]],
         account_status: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Kelly Criterion position sizing with safety fraction."""
+        """Kelly Criterion position sizing with safety fraction and real win rate data."""
 
-        # Extract risk metrics
+        # Extract risk metrics from decision (conservative defaults)
         risk_metrics = trading_decision.get("risk_metrics", {})
-        win_prob = risk_metrics.get("win_probability", 0.5)
         rr_ratio = risk_metrics.get("risk_reward_ratio", 2.0)
+
+        # Try to get REAL win rate from database for this strategy
+        strategy_id = trading_decision.get("strategy_id", "")
+        win_prob = None
+        try:
+            with self.db_session.session_scope() as session:
+                self.queries.session = session
+                win_prob = self.queries.get_strategy_win_rate(
+                    strategy_id, lookback_days=7, min_trades=30
+                )
+        except Exception as e:
+            logger.warning("Failed to fetch strategy win rate from DB", error=str(e))
+
+        # Fall back to conservative 50% if not enough data
+        if win_prob is None:
+            win_prob = 0.50
+            logger.debug("Using conservative 50% win rate (insufficient data)", strategy_id=strategy_id)
+        else:
+            logger.info("Using real win rate from DB", strategy_id=strategy_id, win_rate=f"{win_prob:.1%}")
 
         # Kelly formula: (p * rr - (1 - p)) / rr
         # where p = win probability, rr = risk/reward ratio

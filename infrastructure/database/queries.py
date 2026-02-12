@@ -263,6 +263,80 @@ class DatabaseQueries:
             )
         ).order_by(PerformanceMetrics.date.desc()).all()
 
+    # ========== Strategy Win Rate & Cooldown Queries ==========
+
+    def get_strategy_win_rate(
+        self,
+        strategy_id: str,
+        lookback_days: int = 7,
+        min_trades: int = 30
+    ) -> Optional[float]:
+        """
+        Get actual win rate for a strategy from closed P&L records.
+
+        Returns:
+            Win rate (0.0-1.0) if enough trades, else None (use conservative default).
+        """
+        cutoff = datetime.utcnow() - timedelta(days=lookback_days)
+
+        # Join PnLLedger → Execution → TradingDecision to get strategy_id
+        results = (
+            self.session.query(PnLLedger.realized_pnl_usdt)
+            .join(Execution, Execution.id == PnLLedger.execution_id)
+            .join(TradingDecision, TradingDecision.id == Execution.decision_id)
+            .filter(
+                and_(
+                    TradingDecision.strategy_id == strategy_id,
+                    PnLLedger.is_closed == True,
+                    PnLLedger.exit_time >= cutoff,
+                )
+            )
+            .all()
+        )
+
+        total = len(results)
+        if total < min_trades:
+            return None  # Not enough data — caller should use conservative default
+
+        wins = sum(1 for (pnl,) in results if pnl and pnl > 0)
+        return wins / total
+
+    def get_consecutive_losses(
+        self,
+        symbol: str,
+        lookback_minutes: int = 30
+    ) -> int:
+        """
+        Count consecutive losses (most recent first) for a symbol within lookback window.
+
+        Returns:
+            Number of consecutive losses from the most recent trade backwards.
+        """
+        cutoff = datetime.utcnow() - timedelta(minutes=lookback_minutes)
+
+        recent_closed = (
+            self.session.query(PnLLedger.realized_pnl_usdt)
+            .filter(
+                and_(
+                    PnLLedger.symbol == symbol,
+                    PnLLedger.is_closed == True,
+                    PnLLedger.exit_time >= cutoff,
+                )
+            )
+            .order_by(PnLLedger.exit_time.desc())
+            .limit(10)
+            .all()
+        )
+
+        consecutive = 0
+        for (pnl,) in recent_closed:
+            if pnl is not None and pnl < 0:
+                consecutive += 1
+            else:
+                break  # First non-loss breaks the streak
+
+        return consecutive
+
     # ========== Analytics ==========
 
     def get_strategy_performance(

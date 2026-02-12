@@ -6,7 +6,7 @@ trading:
   execution_mode: "live"  # paper | live | hybrid
   testnet: false  # Use Binance mainnet for market data
   max_concurrent_positions: 3
-  default_leverage: 10
+  default_leverage: 3
 
   # Scalping configuration
   scalping:
@@ -15,7 +15,7 @@ trading:
     max_holding_time_seconds: 600  # 10 minutes max
     timeframes: ["1m", "5m", "15m"]
 
-  # Supported symbols (small-cap coins with low minimum order sizes)
+  # Fallback symbols (used when scanner is disabled or fails)
   symbols:
     - "XRPUSDT"
     - "LINKUSDT"
@@ -26,19 +26,45 @@ trading:
     - "DOTUSDT"
     - "AVAXUSDT"
 
+# Hot Symbol Scanner - multi-source symbol discovery each round
+symbol_scanner:
+  enabled: true
+  min_volume_usdt: 100000000      # Min 24h volume $100M (liquidity filter)
+  top_n: 10                       # Pick top 10 movers
+  min_price_change_pct: 1.5       # Min 1.5% 24h change (momentum filter)
+  max_price_change_pct: 30.0      # Max 30% - skip delistings/anomalous pumps
+  always_include: ["BTCUSDT", "ETHUSDT", "SOLUSDT"]  # Blue-chips: tight spreads, low funding, deep books
+
+  # External sources (merged with Binance movers, multi-source symbols get boosted)
+  use_coingecko: true             # CoinGecko trending coins (free, no key needed)
+  use_cryptopanic: true           # CryptoPanic trending news (needs CRYPTOPANIC_API_KEY env var)
+  # cryptopanic_api_key: ""       # Or set here instead of env var (get free key at cryptopanic.com/developers/api/)
+
 # Risk Management
 risk:
-  # Position sizing limits (adjusted for small $6 account)
-  max_risk_per_trade_pct: 0.10  # 10% of account per trade ($0.60 risk per trade)
-  max_daily_drawdown_pct: 0.20  # 20% daily drawdown limit ($1.20 max daily loss)
-  max_portfolio_exposure_pct: 0.90  # 90% max capital deployed
-  max_position_concentration_pct: 0.50  # Single position max 50%
+  # Position sizing limits
+  max_risk_per_trade_pct: 0.03  # 3% of account per trade (conservative)
+  max_daily_drawdown_pct: 0.06  # 6% daily drawdown limit
+  max_portfolio_exposure_pct: 0.55  # 55% max capital deployed
+  max_position_concentration_pct: 0.25  # Single position max 25%
 
-  # Leverage limits (higher for small account)
+  # Funding rate filter (block trades that pay high funding)
+  max_funding_rate_pct: 0.0005  # 0.05% — block LONGs above this, SHORTs below -this
+
+  # Consecutive loss cooldown
+  consecutive_loss_cooldown:
+    max_losses: 3           # Max consecutive losses before cooldown
+    lookback_minutes: 30    # Window to count losses
+    cooldown_minutes: 15    # How long to pause trading on that symbol
+
+  # Bid-ask spread filter
+  max_spread_bps: 8  # Reject trades where spread > 8 basis points
+
+  # Leverage limits
   leverage_limits:
-    low_volatility: 20    # < 2% volatility
-    medium_volatility: 15  # 2-5% volatility
-    high_volatility: 10    # > 5% volatility
+    low_volatility: 5     # < 2% volatility
+    medium_volatility: 3   # 2-5% volatility
+    high_volatility: 2     # > 5% volatility
 
   # Correlation limits
   max_correlated_positions: 3  # Max positions with correlation > 0.7
@@ -71,12 +97,14 @@ models:
   ollama_base_url: "http://localhost:11434"
 
   # Per-agent LLM toggle
+  # LLM disabled for real-time agents: adds 15-30s latency per symbol,
+  # non-deterministic, no statistical edge for scalping. Rule-based is faster & backtestable.
   agent_llm_enabled:
-    research_coordinator: true
-    trading_decision: true
-    execution_agent: false           # Start disabled (advisory only)
+    research_coordinator: false      # Rule-based indicators are sufficient
+    trading_decision: false          # Rule-based strategies + indicators only
+    execution_agent: false           # No LLM needed for order execution
     storage_reporter: false          # No LLM needed for trade logging
-    emergency_controller: true
+    emergency_controller: false      # Rule-based safety checks only
     risk_manager: false              # ALWAYS false - rule-based only for safety
 
   # Timeout settings
@@ -117,14 +145,14 @@ models:
 
 # Execution Configuration
 execution:
-  # Protective orders (disabled - Binance moved STOP_MARKET to Algo Order API)
-  place_stop_loss: false
-  place_take_profit: false
+  # Protective orders (Binance-side STOP_MARKET and TAKE_PROFIT_MARKET)
+  place_stop_loss: true
+  place_take_profit: true
 
   # Paper trading settings
   paper_trading:
     enabled: true
-    simulated_balance_usdt: 6  # Match real portfolio size for realistic paper testing
+    simulated_balance_usdt: 125  # Match real portfolio size for realistic paper testing
     base_slippage_bps: 5  # 5 basis points base slippage
     market_impact_model: "square_root"  # linear | square_root | custom
 

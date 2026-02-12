@@ -190,6 +190,11 @@ class PnLLedger(Base):
 
     is_closed = Column(Boolean, default=False, index=True)
 
+    # Binance-side protective order IDs
+    sl_order_id = Column(String(50))
+    tp_order_id = Column(String(50))
+    close_reason = Column(String(30))
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

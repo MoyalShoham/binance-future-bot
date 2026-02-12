@@ -215,8 +215,12 @@ class ResearchCoordinatorAgent(BaseAgent):
         Returns:
             Tuple of (market_data dict, technical_indicators dict)
         """
+        # Map scalp timeframe → higher timeframe for trend bias
+        HTF_MAP = {"1m": "15m", "5m": "1h", "15m": "4h"}
+        higher_tf = HTF_MAP.get(timeframe, "1h")
+
         try:
-            with ThreadPoolExecutor(max_workers=5) as pool:
+            with ThreadPoolExecutor(max_workers=6) as pool:
                 ticker_fut = pool.submit(
                     self.binance_client.client.futures_ticker, symbol=symbol
                 )
@@ -227,11 +231,15 @@ class ResearchCoordinatorAgent(BaseAgent):
                     self.binance_client.client.futures_open_interest, symbol=symbol
                 )
                 book_fut = pool.submit(
-                    self.binance_client.get_order_book, symbol, limit=10
+                    self.binance_client.get_order_book, symbol, limit=100
                 )
                 klines_fut = pool.submit(
                     self.binance_client.get_klines,
                     symbol=symbol, interval=timeframe, limit=self.lookback_periods
+                )
+                htf_klines_fut = pool.submit(
+                    self.binance_client.get_klines,
+                    symbol=symbol, interval=higher_tf, limit=50
                 )
 
             # Collect results (all futures completed after exiting the `with` block)
@@ -240,6 +248,7 @@ class ResearchCoordinatorAgent(BaseAgent):
             open_interest_data = oi_fut.result()
             order_book_data = book_fut.result()
             klines = klines_fut.result()
+            htf_klines = htf_klines_fut.result()
 
             # Build market data
             current_price = float(ticker.get("lastPrice", 0))
@@ -259,6 +268,20 @@ class ResearchCoordinatorAgent(BaseAgent):
             else:
                 logger.warning(f"Insufficient kline data for {symbol}")
                 technical_indicators = self._get_default_indicators()
+
+            # Higher timeframe trend bias (multi-TF confirmation)
+            htf_trend = "neutral"
+            if htf_klines and len(htf_klines) >= 50:
+                htf_indicators = self.indicators.calculate_all(htf_klines, current_price)
+                htf_ema9 = htf_indicators.get("ema_9", 0)
+                htf_ema21 = htf_indicators.get("ema_21", 0)
+                htf_ema50 = htf_indicators.get("ema_50", 0)
+                if htf_ema9 > htf_ema21 > htf_ema50:
+                    htf_trend = "bullish"
+                elif htf_ema9 < htf_ema21 < htf_ema50:
+                    htf_trend = "bearish"
+            technical_indicators["htf_trend"] = htf_trend
+            technical_indicators["htf_timeframe"] = higher_tf
 
             logger.debug(
                 "Market data fetched (parallel)",

@@ -43,18 +43,18 @@ class OrderExecutor:
 
     # Fallback rules (used if Binance API is unavailable)
     FALLBACK_SYMBOL_RULES = {
-        "XRPUSDT": {"min_qty": 0.1, "step_size": 0.1, "min_notional": 5.0},
-        "LINKUSDT": {"min_qty": 0.01, "step_size": 0.01, "min_notional": 5.0},
-        "DOGEUSDT": {"min_qty": 1, "step_size": 1, "min_notional": 5.0},
-        "1000SHIBUSDT": {"min_qty": 1, "step_size": 1, "min_notional": 5.0},
-        "1000FLOKIUSDT": {"min_qty": 1, "step_size": 1, "min_notional": 5.0},
-        "ADAUSDT": {"min_qty": 1, "step_size": 1, "min_notional": 5.0},
-        "DOTUSDT": {"min_qty": 0.1, "step_size": 0.1, "min_notional": 5.0},
-        "AVAXUSDT": {"min_qty": 0.1, "step_size": 0.1, "min_notional": 5.0},
-        "BTCUSDT": {"min_qty": 0.001, "step_size": 0.001, "min_notional": 5.0},
-        "ETHUSDT": {"min_qty": 0.001, "step_size": 0.001, "min_notional": 5.0},
+        "XRPUSDT": {"min_qty": 0.1, "step_size": 0.1, "min_notional": 5.0, "price_precision": 4},
+        "LINKUSDT": {"min_qty": 0.01, "step_size": 0.01, "min_notional": 5.0, "price_precision": 3},
+        "DOGEUSDT": {"min_qty": 1, "step_size": 1, "min_notional": 5.0, "price_precision": 5},
+        "1000SHIBUSDT": {"min_qty": 1, "step_size": 1, "min_notional": 5.0, "price_precision": 6},
+        "1000FLOKIUSDT": {"min_qty": 1, "step_size": 1, "min_notional": 5.0, "price_precision": 5},
+        "ADAUSDT": {"min_qty": 1, "step_size": 1, "min_notional": 5.0, "price_precision": 4},
+        "DOTUSDT": {"min_qty": 0.1, "step_size": 0.1, "min_notional": 5.0, "price_precision": 3},
+        "AVAXUSDT": {"min_qty": 0.1, "step_size": 0.1, "min_notional": 5.0, "price_precision": 3},
+        "BTCUSDT": {"min_qty": 0.001, "step_size": 0.001, "min_notional": 5.0, "price_precision": 1},
+        "ETHUSDT": {"min_qty": 0.001, "step_size": 0.001, "min_notional": 5.0, "price_precision": 2},
     }
-    DEFAULT_RULES = {"min_qty": 0.001, "step_size": 0.001, "min_notional": 5.0}
+    DEFAULT_RULES = {"min_qty": 0.001, "step_size": 0.001, "min_notional": 5.0, "price_precision": 2}
 
     def __init__(self, binance_client, config: Dict[str, Any]):
         """
@@ -104,6 +104,7 @@ class OrderExecutor:
                     "min_qty": rules["min_qty"],
                     "step_size": rules["step_size"],
                     "min_notional": rules["min_notional"],
+                    "price_precision": rules.get("price_precision", 2),
                 }
 
             logger.info(
@@ -115,6 +116,24 @@ class OrderExecutor:
                 "Failed to load exchange info, using fallback rules",
                 error=str(e)
             )
+
+    def ensure_symbol_rules(self, symbol: str):
+        """Load exchange rules for a symbol if not already cached."""
+        if symbol in self.SYMBOL_RULES:
+            return
+        try:
+            exchange_rules = self.binance_client.get_symbol_info([symbol])
+            if symbol in exchange_rules:
+                rules = exchange_rules[symbol]
+                self.SYMBOL_RULES[symbol] = {
+                    "min_qty": rules["min_qty"],
+                    "step_size": rules["step_size"],
+                    "min_notional": rules["min_notional"],
+                    "price_precision": rules.get("price_precision", 2),
+                }
+                logger.debug("Loaded exchange rules for new symbol", symbol=symbol)
+        except Exception as e:
+            logger.warning("Failed to load rules for symbol, using defaults", symbol=symbol, error=str(e))
 
     def execute_trade(
         self,
@@ -131,6 +150,9 @@ class OrderExecutor:
         Returns:
             Execution result conforming to execution_result schema
         """
+        # Ensure we have exchange rules for this symbol
+        self.ensure_symbol_rules(approval["symbol"])
+
         # Generate idempotent client order ID
         client_order_id = self._generate_client_order_id(approval)
 
@@ -508,15 +530,25 @@ class OrderExecutor:
         rounded = round(rounded, decimals)
         return rounded
 
+    # Tier-based base slippage: top-tier coins have tighter spreads
+    SLIPPAGE_TIERS = {
+        # Tier 1: BTC/ETH — tightest spreads
+        "BTCUSDT": 3, "ETHUSDT": 3,
+        # Tier 2: Major alts — decent liquidity
+        "XRPUSDT": 5, "SOLUSDT": 5, "BNBUSDT": 4, "DOGEUSDT": 6,
+        "ADAUSDT": 6, "AVAXUSDT": 6, "DOTUSDT": 6, "LINKUSDT": 5,
+    }
+    DEFAULT_SLIPPAGE_BPS = 10  # Mid-cap alts: wider spreads
+
     def _calculate_simulated_slippage(
         self,
         position_size_usdt: float,
         symbol: str
     ) -> float:
         """
-        Calculate simulated slippage for paper trading.
+        Calculate realistic simulated slippage for paper trading.
 
-        Uses market impact model based on position size.
+        Uses per-symbol base slippage (tier-based) + market impact model.
 
         Args:
             position_size_usdt: Position size in USDT
@@ -525,14 +557,13 @@ class OrderExecutor:
         Returns:
             Slippage in basis points
         """
-        base_slippage = self.paper_config["base_slippage_bps"]
+        # Per-symbol base slippage (more realistic than flat 5 bps for all)
+        base_slippage = self.SLIPPAGE_TIERS.get(symbol, self.DEFAULT_SLIPPAGE_BPS)
 
         # Market impact model
         if self.paper_config["market_impact_model"] == "linear":
-            # Linear: slippage increases proportionally
             impact = (position_size_usdt / 10000) * 0.5
         elif self.paper_config["market_impact_model"] == "square_root":
-            # Square root: slippage increases but with diminishing returns
             impact = (position_size_usdt / 10000) ** 0.5
         else:
             impact = 0

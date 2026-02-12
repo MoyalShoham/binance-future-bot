@@ -64,12 +64,13 @@
       "type": "string",
       "enum": [
         "none",
+        "pre_filter",
         "ema_crossover_scalp",
         "vwap_bounce_scalp",
         "orderbook_imbalance_scalp",
         "momentum_breakout_scalp"
       ],
-      "description": "Strategy that generated this decision (none for NO_TRADE)"
+      "description": "Strategy that generated this decision (none/pre_filter for NO_TRADE)"
     },
     "model_used": {
       "type": "string",

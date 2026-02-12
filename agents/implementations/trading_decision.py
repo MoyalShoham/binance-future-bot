@@ -5,7 +5,7 @@ Analyzes market research and makes trading decisions using scalping strategies.
 """
 
 from typing import Dict, Any, Optional, Tuple, List
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 import structlog
 
@@ -44,7 +44,8 @@ class TradingDecisionAgent(BaseAgent):
         self,
         agent_id: str,
         config: Dict[str, Any],
-        model_router=None
+        model_router=None,
+        binance_client=None
     ):
         """
         Initialize Trading Decision Agent.
@@ -53,8 +54,10 @@ class TradingDecisionAgent(BaseAgent):
             agent_id: Agent identifier
             config: System configuration
             model_router: Optional ModelRouter for LLM enhancement
+            binance_client: Optional Binance API client for real balance lookups
         """
         super().__init__(agent_id, config, model_router=model_router)
+        self.binance_client = binance_client
 
         self.validator = SchemaValidator()
 
@@ -75,10 +78,15 @@ class TradingDecisionAgent(BaseAgent):
 
         # Default leverage and position sizing
         trading_config = config.get("trading", {})
-        self.default_leverage = trading_config.get("default_leverage", 5)
+        self.default_leverage = trading_config.get("default_leverage", 3)
 
         # Confidence threshold for trades
         self.min_confidence = 0.70  # Minimum 70% confidence to trade
+
+        # Risk config filters
+        risk_config = config.get("risk", {})
+        self.max_funding_rate_pct = risk_config.get("max_funding_rate_pct", 0.0005)
+        self.max_spread_bps = risk_config.get("max_spread_bps", 8)
 
         logger.debug(
             "Trading Decision Agent initialized",
@@ -112,6 +120,15 @@ class TradingDecisionAgent(BaseAgent):
                 raise ValueError("Missing research_summary in pipeline state")
 
             symbol = research_summary["symbol"]
+
+            # ===== PRE-FILTERS: reject before strategy evaluation =====
+            pre_filter_reject, reject_reason = self._apply_pre_filters(research_summary)
+            if pre_filter_reject:
+                logger.info("Pre-filter rejection", symbol=symbol, reason=reject_reason)
+                # Build a NO_TRADE decision with the rejection reason
+                return self._build_no_trade_decision(
+                    symbol, correlation_id, reject_reason, start_time
+                )
 
             # Evaluate all enabled strategies
             strategy_signals = self._evaluate_all_strategies(research_summary)
@@ -278,13 +295,14 @@ class TradingDecisionAgent(BaseAgent):
         """
         Strategy 1: EMA Crossover Scalp
 
-        Entry:
-        - LONG: EMA9 crosses above EMA21, price > EMA50
-        - SHORT: EMA9 crosses below EMA21, price < EMA50
+        Entry — ACTUAL CROSSOVER detection (not just alignment):
+        - LONG: EMA9 was <= EMA21 last candle, now EMA9 > EMA21, price > EMA50
+        - SHORT: EMA9 was >= EMA21 last candle, now EMA9 < EMA21, price < EMA50
 
         Confirmation:
         - Order book bias in same direction
         - RSI not extreme (30-70)
+        - Higher timeframe trend alignment
         """
         tech_ind = research_summary.get("technical_indicators", {})
         market_data = research_summary.get("market_data", {})
@@ -292,27 +310,37 @@ class TradingDecisionAgent(BaseAgent):
         ema_9 = tech_ind.get("ema_9", 0)
         ema_21 = tech_ind.get("ema_21", 0)
         ema_50 = tech_ind.get("ema_50", 0)
+        prev_ema_9 = tech_ind.get("prev_ema_9", ema_9)
+        prev_ema_21 = tech_ind.get("prev_ema_21", ema_21)
         price = market_data.get("price", 0)
         rsi = tech_ind.get("rsi", 50)
+        htf_trend = tech_ind.get("htf_trend", "neutral")
 
         order_book = market_data.get("order_book", {})
         imbalance = order_book.get("imbalance_ratio", 0)
 
-        # Signal detection
         signal = "neutral"
         confidence = 0.5
 
-        # Bullish setup
-        if ema_9 > ema_21 and price > ema_50:
+        # Bullish crossover: was below/equal, now above
+        bullish_cross = prev_ema_9 <= prev_ema_21 and ema_9 > ema_21
+        # Bearish crossover: was above/equal, now below
+        bearish_cross = prev_ema_9 >= prev_ema_21 and ema_9 < ema_21
+
+        if bullish_cross and price > ema_50:
             if imbalance > 0.1 and 30 < rsi < 70:
                 signal = "long"
                 confidence = 0.75 + (abs(imbalance) * 0.15)
+                # Boost if aligned with higher timeframe
+                if htf_trend == "bullish":
+                    confidence += 0.05
 
-        # Bearish setup
-        elif ema_9 < ema_21 and price < ema_50:
+        elif bearish_cross and price < ema_50:
             if imbalance < -0.1 and 30 < rsi < 70:
                 signal = "short"
                 confidence = 0.75 + (abs(imbalance) * 0.15)
+                if htf_trend == "bearish":
+                    confidence += 0.05
 
         return {
             "signal": signal,
@@ -414,37 +442,50 @@ class TradingDecisionAgent(BaseAgent):
         Strategy 4: Momentum Breakout Scalp
 
         Entry:
-        - LONG: MACD bullish cross + RSI > 55 + price > EMA50
-        - SHORT: MACD bearish cross + RSI < 45 + price < EMA50
+        - LONG: MACD bullish + RSI > 55 + price > EMA50 + high relative volume
+        - SHORT: MACD bearish + RSI < 45 + price < EMA50 + high relative volume
 
         Confirmation:
-        - High volume
+        - Relative volume > 1.5x (current vs 20-candle average)
+        - Higher timeframe trend alignment
         """
         tech_ind = research_summary.get("technical_indicators", {})
         market_data = research_summary.get("market_data", {})
 
         macd_data = tech_ind.get("macd", {})
-        macd_line = macd_data.get("macd_line", 0)
-        signal_line = macd_data.get("signal_line", 0)
         histogram = macd_data.get("histogram", 0)
 
         rsi = tech_ind.get("rsi", 50)
         ema_50 = tech_ind.get("ema_50", 0)
         price = market_data.get("price", 0)
         volume_24h = market_data.get("volume_24h", 0)
+        relative_volume = tech_ind.get("relative_volume", 1.0)
+        htf_trend = tech_ind.get("htf_trend", "neutral")
 
         signal = "neutral"
         confidence = 0.5
 
+        # Use relative volume instead of static 24h threshold
+        volume_ok = volume_24h > 500000000 and relative_volume >= 1.5
+
         # Bullish breakout
-        if histogram > 0 and rsi > 55 and price > ema_50 and volume_24h > 500000000:
+        if histogram > 0 and rsi > 55 and price > ema_50 and volume_ok:
             signal = "long"
             confidence = 0.75 + (min(rsi - 55, 20) / 100)
+            if htf_trend == "bullish":
+                confidence += 0.05
+            # Bonus for very high relative volume
+            if relative_volume >= 2.5:
+                confidence += 0.03
 
         # Bearish breakout
-        elif histogram < 0 and rsi < 45 and price < ema_50 and volume_24h > 500000000:
+        elif histogram < 0 and rsi < 45 and price < ema_50 and volume_ok:
             signal = "short"
             confidence = 0.75 + (min(45 - rsi, 20) / 100)
+            if htf_trend == "bearish":
+                confidence += 0.05
+            if relative_volume >= 2.5:
+                confidence += 0.03
 
         return {
             "signal": signal,
@@ -500,7 +541,9 @@ class TradingDecisionAgent(BaseAgent):
         tech_ind = research_summary.get("technical_indicators", {})
 
         price = market_data.get("price", 0)
-        atr = tech_ind.get("atr", price * 0.01)  # Default 1% ATR
+        atr = tech_ind.get("atr", 0) or 0  # Handle None
+        if atr <= 0:
+            atr = price * 0.01  # Fallback: 1% of price when ATR is 0 or missing
 
         if decision == "NO_TRADE":
             return price, price, []
@@ -540,10 +583,24 @@ class TradingDecisionAgent(BaseAgent):
         Uses configured balance, leverage, and risk per trade.
         Caps notional position so required margin fits within account.
         """
-        # Use simulated balance from config
-        assumed_equity = self.config.get("execution", {}).get(
-            "paper_trading", {}
-        ).get("simulated_balance_usdt", 100)
+        # Try to get real balance from Binance API, fall back to config value
+        assumed_equity = None
+        if self.binance_client:
+            try:
+                account_balance = self.binance_client.get_account_balance()
+                assumed_equity = account_balance.get("total_equity", 0)
+                if assumed_equity > 0:
+                    logger.info(
+                        "Using real Binance balance for position sizing",
+                        equity=assumed_equity,
+                    )
+            except Exception as e:
+                logger.warning("Failed to fetch Binance balance, using config fallback", error=str(e))
+
+        if not assumed_equity or assumed_equity <= 0:
+            assumed_equity = self.config.get("execution", {}).get(
+                "paper_trading", {}
+            ).get("simulated_balance_usdt", 100)
 
         # Risk per trade from config
         risk_pct = self.config.get("risk", {}).get("max_risk_per_trade_pct", 0.10)
@@ -587,9 +644,9 @@ class TradingDecisionAgent(BaseAgent):
         # Risk/reward ratio
         rr_ratio = reward_distance / risk_distance if risk_distance > 0 else 0
 
-        # Win probability (estimated based on historical strategy performance)
-        # Simplified - could be enhanced with backtesting data
-        win_probability = 0.65  # Default 65% win rate
+        # Conservative default: assume coin flip until real data proves otherwise
+        # Risk Manager will use actual DB stats for Kelly sizing
+        win_probability = 0.50
 
         # Max adverse excursion (estimated)
         max_adverse_excursion_pct = abs((stop_loss - entry_price) / entry_price)
@@ -701,6 +758,80 @@ class TradingDecisionAgent(BaseAgent):
             f"{decision} signal from {strategy_name} strategy with {confidence:.0%} confidence. "
             f"Market regime: {market_regime}, RSI: {rsi:.0f}, Volatility: {volatility:.2%}."
         )
+
+    # ========== PRE-FILTERS ==========
+
+    def _apply_pre_filters(
+        self,
+        research_summary: Dict[str, Any]
+    ) -> Tuple[bool, str]:
+        """
+        Apply pre-filters before strategy evaluation.
+        Returns (should_reject: bool, reason: str).
+        """
+        market_data = research_summary.get("market_data", {})
+        order_book = market_data.get("order_book", {})
+
+        # 1. Spread filter — reject if bid-ask spread is too wide
+        spread_bps = order_book.get("spread_bps", 0)
+        if spread_bps > self.max_spread_bps:
+            return True, f"Spread too wide: {spread_bps:.1f} bps > {self.max_spread_bps} bps limit"
+
+        # 2. Funding rate filter — warn but don't block at decision level
+        #    (blocking is done per-direction after decision is made, in risk manager)
+        #    However, if funding is extreme (>0.1%), reject entirely
+        funding_rate = abs(market_data.get("funding_rate", 0))
+        if funding_rate > 0.001:  # > 0.1% per 8h = 0.3%/day
+            return True, f"Extreme funding rate: {funding_rate:.4%} — too costly to hold"
+
+        # 3. Time-of-day filter — reduce quality during low-volume hours
+        #    00:00-04:00 UTC (Asian quiet), 04:00-07:00 UTC (low overlap)
+        utc_hour = datetime.now(timezone.utc).hour
+        if 0 <= utc_hour < 4:
+            # During dead hours, require higher base liquidity
+            volume_24h = market_data.get("volume_24h", 0)
+            if volume_24h < 200000000:  # Need $200M+ volume during quiet hours
+                return True, f"Low-volume hours (UTC {utc_hour}:00) with insufficient liquidity: ${volume_24h:,.0f}"
+
+        return False, ""
+
+    def _build_no_trade_decision(
+        self,
+        symbol: str,
+        correlation_id: str,
+        reason: str,
+        start_time: datetime
+    ) -> Dict[str, Any]:
+        """Build a NO_TRADE decision from a pre-filter rejection."""
+        processing_time = (datetime.utcnow() - start_time).total_seconds() * 1000
+        trading_decision = {
+            "schema_version": "1.0.0",
+            "agent_id": self.agent_id,
+            "correlation_id": correlation_id,
+            "timestamp": datetime.utcnow().isoformat(),
+            "decision_id": str(uuid.uuid4()),
+            "symbol": symbol,
+            "decision": "NO_TRADE",
+            "confidence": 0.0,
+            "expected_holding_time_seconds": 0,
+            "strategy_id": "pre_filter",
+            "model_used": "rule-based",
+            "reasoning_summary": f"Pre-filter: {reason}"[:1500],
+            "entry_price": 0,
+            "stop_loss": 0,
+            "take_profit_levels": [],
+            "position_size_usdt": 0,
+            "leverage": self.default_leverage,
+            "technical_signals": {},
+            "risk_metrics": {},
+            "research_summary_hash": ""
+        }
+
+        is_valid = self.validator.validate_message(trading_decision, "trading_decision", strict=True)
+        if not is_valid:
+            logger.warning("Pre-filter NO_TRADE failed schema validation, returning anyway")
+
+        return trading_decision
 
     # ========== LLM ENHANCEMENT ==========
 
