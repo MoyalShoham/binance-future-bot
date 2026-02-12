@@ -1,17 +1,23 @@
 """
-Position Sync Monitor (formerly Trailing Stop Monitor)
+Position Sync Monitor with Ratcheting TP/SL
 
 Runs inside EmergencyController's background thread to manage open positions.
-For new positions with Binance-side SL/TP orders: syncs with Binance to detect closures.
-For legacy positions (no SL/TP order IDs): falls back to in-memory trailing stop logic.
+
+For new positions with Binance-side SL/TP orders:
+- Syncs with Binance to detect closures (SL/TP triggered)
+- Dynamic SL adjustment: moves SL to breakeven, then trails behind price
+- Time-based exit as safety net
+
+For legacy positions (no SL/TP order IDs):
+- Ratcheting TP/SL system: when TP hit, levels ratchet from current price
+- When SL hit, position closes
+- Time exit remains as safety net
 
 Close reasons:
 - SL_TRIGGERED: Binance-side stop loss order filled
 - TP_TRIGGERED: Binance-side take profit order filled
-- TIME_EXIT: Position held past max holding time (cancel SL/TP + market close)
-- TRAIL_STOP: (legacy) Price retraced past trailing distance from peak
-- HARD_STOP: (legacy) Price hit hard stop loss
-- BREAKEVEN_STOP: (legacy) Price returned to entry after profit
+- STOP_LOSS: Price hit SL level (legacy ratcheting)
+- TIME_EXIT: Position held past max holding time
 """
 
 import math
@@ -28,14 +34,16 @@ logger = structlog.get_logger()
 
 class TrailingStopMonitor:
     """
-    Monitors open positions and syncs with Binance.
+    Monitors open positions and manages exits.
 
     New positions (with sl_order_id/tp_order_id):
     - Detects when Binance closes the position via SL/TP
+    - Dynamic SL: breakeven at 0.4% profit, trail at 0.8%
     - Handles time-based exits by cancelling SL/TP and sending market close
 
     Legacy positions (no sl_order_id/tp_order_id):
-    - Falls back to old in-memory trailing stop logic
+    - Ratcheting TP/SL: when TP hit, recalculate levels from current price
+    - When SL hit, position closes
     """
 
     def __init__(self, binance_client, db_session: DatabaseSession, config: Dict[str, Any], trades_db=None):
@@ -44,18 +52,18 @@ class TrailingStopMonitor:
         self.config = config
         self.trades_db = trades_db
 
-        # Trailing stop config (used for legacy fallback)
+        # Trailing stop config
         ts_config = config.get("trailing_stop", {})
         self.enabled = ts_config.get("enabled", True)
-        self.activation_threshold_pct = ts_config.get("activation_threshold_pct", 0.002)
-        self.trail_distance_pct = ts_config.get("trail_distance_pct", 0.005)
-        self.breakeven_threshold_pct = ts_config.get("breakeven_threshold_pct", 0.003)
+        self.tp_pct = ts_config.get("tp_pct", 0.005)
+        self.sl_pct = ts_config.get("sl_pct", 0.005)
+        self.use_decision_stop_loss = ts_config.get("use_decision_stop_loss", True)
         self.hard_stop_fallback_pct = ts_config.get("hard_stop_fallback_pct", 0.02)
         self.max_holding_time_seconds = ts_config.get(
             "max_holding_time_seconds",
             config.get("trading", {}).get("scalping", {}).get("max_holding_time_seconds", 600)
         )
-        self.log_peak_updates = ts_config.get("log_peak_updates", False)
+        self.log_level_updates = ts_config.get("log_level_updates", False)
 
         # Execution mode from config
         self.execution_mode = config.get("trading", {}).get("execution_mode", "paper")
@@ -74,9 +82,8 @@ class TrailingStopMonitor:
         # Dynamic SL states: {pnl_ledger_id: {"stage": "initial"|"breakeven"|"trailing", "current_sl": float}}
         self.sl_states = {}
 
-        # In-memory state (legacy trailing stop)
-        self.peak_prices = {}  # {pnl_ledger_id: peak_price}
-        self.position_states = {}  # {pnl_ledger_id: "MONITORING" | "TRAILING_ACTIVE" | "BREAKEVEN_ACTIVE"}
+        # In-memory state for legacy ratcheting: {pnl_ledger_id: {"tp": float, "sl": float, "ratchet_count": int}}
+        self.position_levels = {}
         self.closing_in_progress = set()  # prevent race conditions
 
         # Symbol rules for quantity rounding (reuse from OrderExecutor)
@@ -86,6 +93,9 @@ class TrailingStopMonitor:
         logger.info(
             "TrailingStopMonitor initialized",
             enabled=self.enabled,
+            tp_pct=self.tp_pct,
+            sl_pct=self.sl_pct,
+            use_decision_stop_loss=self.use_decision_stop_loss,
             max_holding_seconds=self.max_holding_time_seconds,
             execution_mode=self.execution_mode,
         )
@@ -94,7 +104,7 @@ class TrailingStopMonitor:
         """
         Check all open positions.
         For positions with SL/TP order IDs: sync with Binance.
-        For legacy positions: apply trailing stop logic.
+        For legacy positions: apply ratcheting TP/SL logic.
         Called every 5 seconds from EmergencyController loop.
         """
         if not self.enabled:
@@ -106,9 +116,8 @@ class TrailingStopMonitor:
                 open_positions = queries.get_open_positions()
 
                 if not open_positions:
-                    # Clean up stale tracking state
-                    self.peak_prices.clear()
-                    self.position_states.clear()
+                    self.position_levels.clear()
+                    self.sl_states.clear()
                     return
 
                 logger.debug("Position sync monitoring", open_positions=len(open_positions))
@@ -130,7 +139,7 @@ class TrailingStopMonitor:
                             # New-style: Binance-side SL/TP
                             self._check_synced_position(position, binance_positions, session)
                         else:
-                            # Legacy: in-memory trailing stop
+                            # Legacy: ratcheting TP/SL
                             self._check_legacy_position(position, session)
                     except Exception as e:
                         logger.error(
@@ -143,10 +152,9 @@ class TrailingStopMonitor:
 
                 # Clean up tracking for positions that no longer exist
                 open_ids = {p.id for p in open_positions}
-                stale_ids = (set(self.peak_prices.keys()) | set(self.sl_states.keys())) - open_ids
+                stale_ids = (set(self.position_levels.keys()) | set(self.sl_states.keys())) - open_ids
                 for stale_id in stale_ids:
-                    self.peak_prices.pop(stale_id, None)
-                    self.position_states.pop(stale_id, None)
+                    self.position_levels.pop(stale_id, None)
                     self.sl_states.pop(stale_id, None)
                     self.closing_in_progress.discard(stale_id)
 
@@ -203,21 +211,18 @@ class TrailingStopMonitor:
                 recent_trades = self.binance_client.get_recent_trades(position.symbol, limit=20)
                 # Find closing trades (opposite side of position)
                 close_side = "SELL" if position.side == "LONG" else "BUY"
-                # Filter trades that are recent (within last 60 seconds) and match close side
                 closing_fills = [
                     t for t in recent_trades
                     if t["side"] == close_side and t["realized_pnl"] != 0
                 ]
 
                 if closing_fills:
-                    # Use the most recent closing fill(s)
                     latest_fill = closing_fills[-1]
                     exit_price = latest_fill["price"]
                     actual_pnl = sum(t["realized_pnl"] for t in closing_fills[-5:])
                     actual_fees = sum(t["commission"] for t in closing_fills[-5:])
 
                     # Determine SL vs TP by realized PnL sign
-                    is_long = position.side == "LONG"
                     if actual_pnl > 0:
                         close_reason = "TP_TRIGGERED"
                     else:
@@ -342,8 +347,8 @@ class TrailingStopMonitor:
     def _adjust_dynamic_sl(self, position: PnLLedger, session):
         """Adjust Binance-side SL order based on price movement.
 
-        Stage 1 (initial → breakeven): At breakeven_move_pct profit, move SL to entry price.
-        Stage 2 (breakeven → trailing): At trail_activation_pct profit, trail SL behind price.
+        Stage 1 (initial -> breakeven): At breakeven_move_pct profit, move SL to entry price.
+        Stage 2 (breakeven -> trailing): At trail_activation_pct profit, trail SL behind price.
         SL only moves forward (never backward).
         """
         pos_id = position.id
@@ -470,10 +475,10 @@ class TrailingStopMonitor:
                 exc_info=True,
             )
 
-    # ========== LEGACY: In-memory trailing stop ==========
+    # ========== LEGACY: Ratcheting TP/SL ==========
 
     def _check_legacy_position(self, position: PnLLedger, session):
-        """Legacy trailing stop logic for positions without Binance-side SL/TP."""
+        """Legacy ratcheting TP/SL logic for positions without Binance-side SL/TP."""
         pos_id = position.id
 
         if pos_id in self.closing_in_progress:
@@ -488,13 +493,20 @@ class TrailingStopMonitor:
             session.commit()
             return
 
-        # Fetch current price
+        is_long = position.side == "LONG"
         current_price = self.binance_client.get_ticker_price(position.symbol)
 
-        # Initialize tracking state if new
-        if pos_id not in self.peak_prices:
-            self.peak_prices[pos_id] = current_price
-            self.position_states[pos_id] = "MONITORING"
+        # === Initialize TP/SL levels for new position ===
+        if pos_id not in self.position_levels:
+            initial_sl = self._get_initial_sl(position, current_price, is_long, session)
+            initial_tp = self._calc_tp(current_price, is_long)
+
+            self.position_levels[pos_id] = {
+                "tp": initial_tp,
+                "sl": initial_sl,
+                "ratchet_count": 0,
+            }
+
             logger.info(
                 "Tracking legacy position",
                 position_id=pos_id,
@@ -502,72 +514,85 @@ class TrailingStopMonitor:
                 side=position.side,
                 entry_price=position.entry_price,
                 current_price=current_price,
+                tp=round(initial_tp, 6),
+                sl=round(initial_sl, 6),
             )
 
-        # Update peak price
-        is_long = position.side == "LONG"
-        old_peak = self.peak_prices[pos_id]
+        levels = self.position_levels[pos_id]
+        tp = levels["tp"]
+        sl = levels["sl"]
 
-        if is_long:
-            if current_price > old_peak:
-                self.peak_prices[pos_id] = current_price
-        else:
-            if current_price < old_peak:
-                self.peak_prices[pos_id] = current_price
+        # === 1. Check SL ===
+        if is_long and current_price <= sl:
+            self._close_position(position, current_price, "STOP_LOSS", session)
+            return
+        elif not is_long and current_price >= sl:
+            self._close_position(position, current_price, "STOP_LOSS", session)
+            return
 
-        peak_price = self.peak_prices[pos_id]
-        entry_price = position.entry_price
-        state = self.position_states[pos_id]
+        # === 2. Check TP -> Ratchet ===
+        if is_long and current_price >= tp:
+            self._ratchet(pos_id, current_price, is_long, position.symbol)
+        elif not is_long and current_price <= tp:
+            self._ratchet(pos_id, current_price, is_long, position.symbol)
 
-        # Calculate profit percentages
-        if is_long:
-            profit_from_entry_pct = (current_price - entry_price) / entry_price
-            profit_from_peak_pct = (peak_price - entry_price) / entry_price
-            retrace_from_peak_pct = (peak_price - current_price) / peak_price if peak_price > 0 else 0
-        else:
-            profit_from_entry_pct = (entry_price - current_price) / entry_price
-            profit_from_peak_pct = (entry_price - peak_price) / entry_price
-            retrace_from_peak_pct = (current_price - peak_price) / peak_price if peak_price > 0 else 0
-
-        # 1. Check hard stop loss
-        hard_stop = self._get_hard_stop(position, session)
-        if hard_stop is not None:
-            if is_long and current_price <= hard_stop:
-                self._close_position(position, current_price, "HARD_STOP", session)
-                return
-            elif not is_long and current_price >= hard_stop:
-                self._close_position(position, current_price, "HARD_STOP", session)
-                return
-        else:
-            if profit_from_entry_pct <= -self.hard_stop_fallback_pct:
-                self._close_position(position, current_price, "HARD_STOP", session)
-                return
-
-        # 2. Check time-based exit
+        # === 3. Check time exit ===
         holding_seconds = (datetime.utcnow() - position.entry_time).total_seconds()
         if holding_seconds >= self.max_holding_time_seconds:
             self._close_position(position, current_price, "TIME_EXIT", session)
             return
 
-        # 3. Check breakeven activation
-        if state == "MONITORING" and profit_from_peak_pct >= self.breakeven_threshold_pct:
-            self.position_states[pos_id] = "BREAKEVEN_ACTIVE"
-            state = "BREAKEVEN_ACTIVE"
+    def _get_initial_sl(self, position: PnLLedger, current_price: float, is_long: bool, session) -> float:
+        """Determine initial SL: use TradingDecision hard stop if available, else fallback."""
+        if self.use_decision_stop_loss:
+            hard_stop = self._get_hard_stop(position, session)
+            if hard_stop is not None:
+                return hard_stop
 
-        # 4. Check trailing stop activation
-        if state in ("MONITORING", "BREAKEVEN_ACTIVE") and profit_from_peak_pct >= self.activation_threshold_pct:
-            self.position_states[pos_id] = "TRAILING_ACTIVE"
-            state = "TRAILING_ACTIVE"
+        # Fallback: use hard_stop_fallback_pct from entry price
+        if is_long:
+            return position.entry_price * (1 - self.hard_stop_fallback_pct)
+        else:
+            return position.entry_price * (1 + self.hard_stop_fallback_pct)
 
-        # 5. Check breakeven stop trigger
-        if state == "BREAKEVEN_ACTIVE" and profit_from_entry_pct <= 0:
-            self._close_position(position, current_price, "BREAKEVEN_STOP", session)
-            return
+    def _calc_tp(self, price: float, is_long: bool) -> float:
+        """Calculate TP level from a given price."""
+        if is_long:
+            return price * (1 + self.tp_pct)
+        else:
+            return price * (1 - self.tp_pct)
 
-        # 6. Check trailing stop trigger
-        if state == "TRAILING_ACTIVE" and retrace_from_peak_pct >= self.trail_distance_pct:
-            self._close_position(position, current_price, "TRAIL_STOP", session)
-            return
+    def _calc_sl(self, price: float, is_long: bool) -> float:
+        """Calculate SL level from a given price."""
+        if is_long:
+            return price * (1 - self.sl_pct)
+        else:
+            return price * (1 + self.sl_pct)
+
+    def _ratchet(self, pos_id: int, current_price: float, is_long: bool, symbol: str):
+        """Ratchet TP/SL levels from current price after TP hit."""
+        levels = self.position_levels[pos_id]
+        old_tp = levels["tp"]
+        old_sl = levels["sl"]
+
+        new_tp = self._calc_tp(current_price, is_long)
+        new_sl = self._calc_sl(current_price, is_long)
+
+        levels["tp"] = new_tp
+        levels["sl"] = new_sl
+        levels["ratchet_count"] += 1
+
+        logger.info(
+            "TP hit, ratcheting",
+            position_id=pos_id,
+            symbol=symbol,
+            ratchet=levels["ratchet_count"],
+            price=current_price,
+            old_tp=round(old_tp, 6),
+            new_tp=round(new_tp, 6),
+            old_sl=round(old_sl, 6),
+            new_sl=round(new_sl, 6),
+        )
 
     # ========== SHARED HELPERS ==========
 
@@ -638,6 +663,9 @@ class TrailingStopMonitor:
             except Exception as e:
                 logger.warning("Failed to record trade close in trades_db", error=str(e))
 
+        # Include ratchet count in close log if available
+        ratchet_count = self.position_levels.get(position.id, {}).get("ratchet_count", 0)
+
         logger.info(
             "Position closed",
             position_id=position.id,
@@ -648,11 +676,11 @@ class TrailingStopMonitor:
             realized_pnl=round(realized_pnl, 6),
             fees=round(total_fees, 6),
             holding_time_seconds=holding_seconds,
+            ratchets=ratchet_count,
         )
 
         # Clean up tracking state
-        self.peak_prices.pop(position.id, None)
-        self.position_states.pop(position.id, None)
+        self.position_levels.pop(position.id, None)
         self.sl_states.pop(position.id, None)
 
     def _close_position(self, position: PnLLedger, current_price: float, reason: str, session):

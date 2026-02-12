@@ -52,7 +52,8 @@
       "Bash(powershell.exe -Command \"cd ''C:\\\\Users\\\\User\\\\Desktop\\\\binance-future-bot''; & ''.\\\\.conda\\\\python.exe'' -c ''from infrastructure.trailing_stop import TrailingStopMonitor; print\\(chr\\(79\\)+chr\\(75\\)\\)''\")",
       "Bash(git merge:*)",
       "Bash(git pull:*)",
-      "Bash(git stash:*)"
+      "Bash(git stash:*)",
+      "Bash(\".\\\\.conda\\\\python.exe\" -c \"import py_compile; py_compile.compile\\(''infrastructure/trailing_stop.py'', doraise=True\\); print\\(''OK''\\)\")"
     ]
   }
 }

@@ -255,24 +255,23 @@ strategies:
     volume_multiplier: 1.5  # 1.5x average volume required
     expected_holding_time_seconds: 240
 
-# Trailing Stop Configuration
+# Trailing Stop Configuration (Ratcheting TP/SL)
 trailing_stop:
   enabled: true
   check_interval_seconds: 5
 
-  # Trail activation: only start trailing after position moves this % in profit
-  activation_threshold_pct: 0.002  # 0.2%
+  # TP/SL percentages (applied from current price at each ratchet)
+  tp_pct: 0.005        # 0.5% — take profit trigger (ratchets, doesn't close)
+  sl_pct: 0.005        # 0.5% — stop loss trigger (CLOSES position)
 
-  # Trail distance: close when price retraces this % from peak
-  trail_distance_pct: 0.005  # 0.5%
+  # Hard stop: use initial SL from TradingDecision (1.5 ATR-based)
+  # After first TP hit and ratchet, switches to sl_pct for subsequent SL levels
+  use_decision_stop_loss: true
 
-  # Breakeven: move stop to entry after this % profit
-  breakeven_threshold_pct: 0.003  # 0.3%
-
-  # Hard stop loss: fallback % if no stop_loss in trading decision
+  # Fallback SL % if no TradingDecision stop_loss available
   hard_stop_fallback_pct: 0.02  # 2%
 
-  # Time-based exit (overrides scalping.max_holding_time_seconds if set)
+  # Time-based exit (safety net)
   max_holding_time_seconds: 600  # 10 minutes
 
   # Dynamic SL adjustment (move SL to breakeven, then trail)
@@ -284,7 +283,7 @@ trailing_stop:
     min_move_pct: 0.001          # Only move SL if change > 0.1%
 
   # Logging
-  log_peak_updates: false  # Reduce log spam
+  log_level_updates: false  # Log each TP/SL level update
 
 # Monitoring & Alerts
 monitoring:
