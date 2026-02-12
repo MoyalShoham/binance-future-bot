@@ -56,6 +56,10 @@ class OrderExecutor:
     }
     DEFAULT_RULES = {"min_qty": 0.001, "step_size": 0.001, "min_notional": 5.0, "price_precision": 2}
 
+    # Binance Futures enforces a minimum notional of 100 USDT server-side
+    # for most pairs (error -4164), even though MIN_NOTIONAL filter says 5.
+    FUTURES_MIN_NOTIONAL = 100.0
+
     def __init__(self, binance_client, config: Dict[str, Any]):
         """
         Initialize order executor.
@@ -383,8 +387,10 @@ class OrderExecutor:
             if quantity < rules["min_qty"]:
                 quantity = rules["min_qty"]
             notional = quantity * entry_price
-            if notional < rules["min_notional"]:
-                quantity = self._round_quantity(symbol, rules["min_notional"] / entry_price + rules["step_size"])
+            # Use FUTURES_MIN_NOTIONAL (100 USDT) — Binance enforces this server-side
+            effective_min_notional = max(rules["min_notional"], self.FUTURES_MIN_NOTIONAL)
+            if notional < effective_min_notional:
+                quantity = self._round_quantity(symbol, effective_min_notional / entry_price + rules["step_size"])
 
             logger.info("Order quantity calculated", symbol=symbol, quantity=quantity, notional=quantity * entry_price)
 

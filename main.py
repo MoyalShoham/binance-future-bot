@@ -197,6 +197,14 @@ def run_single_cycle(
         elapsed_ms = int((_time.monotonic() - _cycle_start) * 1000)
         errors = final_state.get("errors", [])
 
+        # R:R and size info for trade decisions
+        rr = trading_decision.get("risk_metrics", {}).get("risk_reward_ratio", 0)
+        size = trading_decision.get("position_size_usdt", 0)
+        extra = {}
+        if decision in ("LONG", "SHORT"):
+            extra["rr"] = f"{rr:.1f}:1"
+            extra["size"] = f"${size:.0f}"
+
         if errors:
             logger.warning(
                 "CYCLE",
@@ -206,6 +214,7 @@ def run_single_cycle(
                 strategy=strategy,
                 time=f"{elapsed_ms}ms",
                 errors=len(errors),
+                **extra,
             )
         else:
             logger.info(
@@ -215,6 +224,7 @@ def run_single_cycle(
                 confidence=f"{confidence:.0%}",
                 strategy=strategy,
                 time=f"{elapsed_ms}ms",
+                **extra,
             )
 
     except Exception as e:

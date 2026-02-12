@@ -534,6 +534,8 @@ class TradingDecisionAgent(BaseAgent):
         """
         Calculate entry, stop loss, and take profit levels.
 
+        Uses configurable ATR multipliers with minimum R:R enforcement.
+
         Returns:
             (entry_price, stop_loss, take_profit_levels)
         """
@@ -548,25 +550,34 @@ class TradingDecisionAgent(BaseAgent):
         if decision == "NO_TRADE":
             return price, price, []
 
+        # Read configurable multipliers from config
+        risk_config = self.config.get("risk", {})
+        sl_mult = risk_config.get("sl_atr_multiplier", 1.0)
+        tp_mult = risk_config.get("tp_atr_multiplier", 2.5)
+        min_rr = risk_config.get("min_rr_ratio", 2.0)
+        min_sl_dist_pct = risk_config.get("min_sl_distance_pct", 0.003)
+
         # Entry: current market price
         entry_price = price
 
-        # Stop loss: 1.5 ATR away
-        if decision == "LONG":
-            stop_loss = entry_price - (atr * 1.5)
-        else:  # SHORT
-            stop_loss = entry_price + (atr * 1.5)
+        # Stop loss distance: SL multiplier * ATR, with minimum floor
+        sl_distance = atr * sl_mult
+        min_sl_distance = entry_price * min_sl_dist_pct
+        sl_distance = max(sl_distance, min_sl_distance)
 
-        # Take profit: Multiple levels for partial exits
+        # Take profit distance: TP multiplier * ATR, enforce min R:R
+        tp_distance = atr * tp_mult
+        tp_distance = max(tp_distance, sl_distance * min_rr)
+
         if decision == "LONG":
+            stop_loss = entry_price - sl_distance
             take_profit_levels = [
-                {"price": entry_price + (atr * 2.0), "quantity_pct": 0.5},  # 2 ATR
-                {"price": entry_price + (atr * 3.0), "quantity_pct": 0.5}   # 3 ATR
+                {"price": entry_price + tp_distance, "quantity_pct": 1.0},
             ]
         else:  # SHORT
+            stop_loss = entry_price + sl_distance
             take_profit_levels = [
-                {"price": entry_price - (atr * 2.0), "quantity_pct": 0.5},
-                {"price": entry_price - (atr * 3.0), "quantity_pct": 0.5}
+                {"price": entry_price - tp_distance, "quantity_pct": 1.0},
             ]
 
         return entry_price, stop_loss, take_profit_levels
@@ -614,11 +625,17 @@ class TradingDecisionAgent(BaseAgent):
         else:
             position_size = assumed_equity * 0.5  # Default: 50% of equity
 
-        # Cap position size so margin fits within account (leverage-aware)
-        # max_notional = equity * leverage * utilization_factor
+        # Cap position size per-position (allow room for multiple concurrent positions)
         leverage = self.default_leverage
-        max_notional = assumed_equity * leverage * 0.80  # Use 80% of margin capacity
+        max_concurrent = self.config.get("trading", {}).get("max_concurrent_positions", 3)
+        max_exposure_pct = self.config.get("risk", {}).get("max_portfolio_exposure_pct", 0.55)
+        per_position_pct = max_exposure_pct / max_concurrent
+        max_notional = assumed_equity * per_position_pct * leverage
         position_size = min(position_size, max_notional)
+
+        # Enforce Binance Futures minimum notional ($100)
+        min_notional = 100.0
+        position_size = max(position_size, min_notional)
 
         return round(position_size, 2)
 

@@ -63,6 +63,17 @@ class TrailingStopMonitor:
         # Fee rate for P&L calculation
         self.taker_fee_bps = config.get("execution", {}).get("fees", {}).get("taker_bps", 5)
 
+        # Dynamic SL config (for Binance-side SL adjustment)
+        dynamic_sl_config = ts_config.get("dynamic_sl", {})
+        self.dynamic_sl_enabled = dynamic_sl_config.get("enabled", True)
+        self.dsl_breakeven_pct = dynamic_sl_config.get("breakeven_move_pct", 0.004)
+        self.dsl_trail_activation_pct = dynamic_sl_config.get("trail_activation_pct", 0.008)
+        self.dsl_trail_step_pct = dynamic_sl_config.get("trail_step_pct", 0.003)
+        self.dsl_min_move_pct = dynamic_sl_config.get("min_move_pct", 0.001)
+
+        # Dynamic SL states: {pnl_ledger_id: {"stage": "initial"|"breakeven"|"trailing", "current_sl": float}}
+        self.sl_states = {}
+
         # In-memory state (legacy trailing stop)
         self.peak_prices = {}  # {pnl_ledger_id: peak_price}
         self.position_states = {}  # {pnl_ledger_id: "MONITORING" | "TRAILING_ACTIVE" | "BREAKEVEN_ACTIVE"}
@@ -132,10 +143,11 @@ class TrailingStopMonitor:
 
                 # Clean up tracking for positions that no longer exist
                 open_ids = {p.id for p in open_positions}
-                stale_ids = set(self.peak_prices.keys()) - open_ids
+                stale_ids = (set(self.peak_prices.keys()) | set(self.sl_states.keys())) - open_ids
                 for stale_id in stale_ids:
                     self.peak_prices.pop(stale_id, None)
                     self.position_states.pop(stale_id, None)
+                    self.sl_states.pop(stale_id, None)
                     self.closing_in_progress.discard(stale_id)
 
         except Exception as e:
@@ -165,73 +177,94 @@ class TrailingStopMonitor:
             self._handle_sl_tp_triggered(position, session)
             return
 
-        # Position still open on Binance — check time-based exit only
+        # Position still open on Binance — check time-based exit
         holding_seconds = (datetime.utcnow() - position.entry_time).total_seconds()
         if holding_seconds >= self.max_holding_time_seconds:
             self._handle_time_exit(position, session)
             return
 
+        # Dynamic SL adjustment (breakeven + trail)
+        if self.dynamic_sl_enabled and position.sl_order_id and self.execution_mode != "paper":
+            self._adjust_dynamic_sl(position, session)
+
     def _handle_sl_tp_triggered(self, position: PnLLedger, session):
-        """Position is gone from Binance — determine which order closed it."""
+        """Position is gone from Binance — use recent trades for accurate fill data."""
         pos_id = position.id
         self.closing_in_progress.add(pos_id)
 
         try:
             close_reason = "SL_TRIGGERED"
             exit_price = 0.0
+            actual_pnl = None
+            actual_fees = None
 
-            # Check SL order status (algo orders use algoStatus: TRIGGERED/FINISHED)
-            if position.sl_order_id:
-                try:
-                    sl_status = self.binance_client.get_algo_order_status(
-                        position.symbol, int(position.sl_order_id)
-                    )
-                    algo_status = sl_status.get("algoStatus", "")
-                    if algo_status in ("TRIGGERED", "FINISHED"):
+            # PRIMARY: Get actual fill data from account trades API
+            try:
+                recent_trades = self.binance_client.get_recent_trades(position.symbol, limit=20)
+                # Find closing trades (opposite side of position)
+                close_side = "SELL" if position.side == "LONG" else "BUY"
+                # Filter trades that are recent (within last 60 seconds) and match close side
+                closing_fills = [
+                    t for t in recent_trades
+                    if t["side"] == close_side and t["realized_pnl"] != 0
+                ]
+
+                if closing_fills:
+                    # Use the most recent closing fill(s)
+                    latest_fill = closing_fills[-1]
+                    exit_price = latest_fill["price"]
+                    actual_pnl = sum(t["realized_pnl"] for t in closing_fills[-5:])
+                    actual_fees = sum(t["commission"] for t in closing_fills[-5:])
+
+                    # Determine SL vs TP by realized PnL sign
+                    is_long = position.side == "LONG"
+                    if actual_pnl > 0:
+                        close_reason = "TP_TRIGGERED"
+                    else:
                         close_reason = "SL_TRIGGERED"
-                        exit_price = float(sl_status.get("triggerPrice", 0))
-                except Exception as e:
-                    logger.warning("Failed to check SL algo order status", error=str(e))
-                    # Fallback: try legacy order status
+
+                    logger.info(
+                        "Got fill data from account trades",
+                        symbol=position.symbol,
+                        exit_price=exit_price,
+                        realized_pnl=actual_pnl,
+                        fees=actual_fees,
+                    )
+            except Exception as e:
+                logger.warning("Failed to get recent trades, falling back to algo order status", error=str(e))
+
+            # FALLBACK: Check algo order statuses if trades API failed
+            if exit_price <= 0:
+                if position.sl_order_id:
                     try:
-                        sl_status = self.binance_client.get_order_status(
+                        sl_status = self.binance_client.get_algo_order_status(
                             position.symbol, int(position.sl_order_id)
                         )
-                        if sl_status["status"] == "FILLED":
+                        algo_status = sl_status.get("algoStatus", "")
+                        if algo_status in ("TRIGGERED", "FINISHED"):
                             close_reason = "SL_TRIGGERED"
-                            exit_price = sl_status["avg_price"]
-                    except Exception:
-                        pass
+                            exit_price = float(sl_status.get("triggerPrice", 0))
+                    except Exception as e:
+                        logger.warning("Failed to check SL algo order status", error=str(e))
 
-            # Check TP order status
-            if position.tp_order_id:
-                try:
-                    tp_status = self.binance_client.get_algo_order_status(
-                        position.symbol, int(position.tp_order_id)
-                    )
-                    algo_status = tp_status.get("algoStatus", "")
-                    if algo_status in ("TRIGGERED", "FINISHED"):
-                        close_reason = "TP_TRIGGERED"
-                        exit_price = float(tp_status.get("triggerPrice", 0))
-                except Exception as e:
-                    logger.warning("Failed to check TP algo order status", error=str(e))
-                    # Fallback: try legacy order status
+                if position.tp_order_id:
                     try:
-                        tp_status = self.binance_client.get_order_status(
+                        tp_status = self.binance_client.get_algo_order_status(
                             position.symbol, int(position.tp_order_id)
                         )
-                        if tp_status["status"] == "FILLED":
+                        algo_status = tp_status.get("algoStatus", "")
+                        if algo_status in ("TRIGGERED", "FINISHED"):
                             close_reason = "TP_TRIGGERED"
-                            exit_price = tp_status["avg_price"]
-                    except Exception:
-                        pass
+                            exit_price = float(tp_status.get("triggerPrice", 0))
+                    except Exception as e:
+                        logger.warning("Failed to check TP algo order status", error=str(e))
 
-            # If we couldn't determine exit price from orders, use current ticker
+            # LAST RESORT: Use current ticker price
             if exit_price <= 0:
                 try:
                     exit_price = self.binance_client.get_ticker_price(position.symbol)
                 except Exception:
-                    exit_price = position.entry_price  # absolute fallback
+                    exit_price = position.entry_price
 
             # Cancel remaining counterpart orders (both algo and regular)
             try:
@@ -244,7 +277,8 @@ class TrailingStopMonitor:
                 logger.warning("Failed to cancel remaining regular orders", symbol=position.symbol, error=str(e))
 
             # Calculate realized P&L
-            self._finalize_close(position, exit_price, close_reason, session)
+            self._finalize_close(position, exit_price, close_reason, session,
+                                 actual_pnl=actual_pnl, actual_fees=actual_fees)
 
         except Exception as e:
             logger.error("Failed to handle SL/TP triggered close", position_id=pos_id, error=str(e), exc_info=True)
@@ -302,6 +336,139 @@ class TrailingStopMonitor:
             logger.error("Failed to handle time exit", position_id=pos_id, error=str(e), exc_info=True)
         finally:
             self.closing_in_progress.discard(pos_id)
+
+    # ========== DYNAMIC SL: Breakeven + Trail ==========
+
+    def _adjust_dynamic_sl(self, position: PnLLedger, session):
+        """Adjust Binance-side SL order based on price movement.
+
+        Stage 1 (initial → breakeven): At breakeven_move_pct profit, move SL to entry price.
+        Stage 2 (breakeven → trailing): At trail_activation_pct profit, trail SL behind price.
+        SL only moves forward (never backward).
+        """
+        pos_id = position.id
+        is_long = position.side == "LONG"
+
+        try:
+            current_price = self.binance_client.get_ticker_price(position.symbol)
+        except Exception:
+            return
+
+        entry_price = position.entry_price
+
+        # Calculate current profit %
+        if is_long:
+            profit_pct = (current_price - entry_price) / entry_price
+        else:
+            profit_pct = (entry_price - current_price) / entry_price
+
+        # Initialize state if needed
+        if pos_id not in self.sl_states:
+            self.sl_states[pos_id] = {
+                "stage": "initial",
+                "current_sl": 0.0,  # 0 means using original SL
+            }
+
+        state = self.sl_states[pos_id]
+        new_sl = None
+
+        # Stage 1: Move to breakeven
+        if state["stage"] == "initial" and profit_pct >= self.dsl_breakeven_pct:
+            # Move SL to entry price (breakeven)
+            new_sl = entry_price
+            state["stage"] = "breakeven"
+            logger.info(
+                "Moving SL to breakeven",
+                symbol=position.symbol,
+                side=position.side,
+                profit_pct=f"{profit_pct:.3%}",
+                new_sl=new_sl,
+            )
+
+        # Stage 2: Trail SL behind price
+        if (state["stage"] in ("breakeven", "trailing") and
+                profit_pct >= self.dsl_trail_activation_pct):
+            state["stage"] = "trailing"
+
+            # Calculate trailing SL
+            if is_long:
+                trail_sl = current_price * (1 - self.dsl_trail_step_pct)
+            else:
+                trail_sl = current_price * (1 + self.dsl_trail_step_pct)
+
+            # Only move SL forward (tighter), never backward
+            current_sl = state["current_sl"]
+            if is_long:
+                if trail_sl > current_sl:
+                    new_sl = trail_sl
+            else:
+                if current_sl == 0 or trail_sl < current_sl:
+                    new_sl = trail_sl
+
+        # Apply SL change if needed
+        if new_sl is not None:
+            current_sl = state["current_sl"]
+            # Check minimum move threshold
+            if current_sl > 0:
+                move_pct = abs(new_sl - current_sl) / entry_price
+                if move_pct < self.dsl_min_move_pct:
+                    return  # Move too small, skip
+
+            self._replace_sl_order(position, new_sl, session)
+            state["current_sl"] = new_sl
+
+    def _round_price(self, symbol: str, price: float) -> float:
+        """Round price to symbol's price precision."""
+        rules = self.SYMBOL_RULES.get(symbol, self.DEFAULT_RULES)
+        precision = rules.get("price_precision", 2)
+        return round(price, precision)
+
+    def _replace_sl_order(self, position: PnLLedger, new_sl_price: float, session):
+        """Cancel existing SL order and place a new one at new_sl_price."""
+        symbol = position.symbol
+        is_long = position.side == "LONG"
+        close_side = "SELL" if is_long else "BUY"
+
+        # Round to symbol's price precision (e.g. BTCUSDT=1 decimal)
+        new_sl_price = self._round_price(symbol, new_sl_price)
+
+        # Cancel old SL
+        if position.sl_order_id:
+            try:
+                self.binance_client.cancel_algo_order(symbol, int(position.sl_order_id))
+                logger.info("Cancelled old SL order", symbol=symbol, old_sl_id=position.sl_order_id)
+            except Exception as e:
+                logger.warning("Failed to cancel old SL order", symbol=symbol, error=str(e))
+                # Continue anyway — we'll place the new one
+
+        # Place new SL
+        try:
+            result = self.binance_client.create_algo_order(
+                symbol=symbol,
+                side=close_side,
+                order_type="STOP_MARKET",
+                trigger_price=new_sl_price,
+                close_position=True,
+            )
+
+            new_sl_id = str(result.get("algoId", ""))
+            position.sl_order_id = new_sl_id
+            session.flush()
+
+            logger.info(
+                "SL order replaced",
+                symbol=symbol,
+                new_sl_price=new_sl_price,
+                new_sl_id=new_sl_id,
+            )
+        except Exception as e:
+            logger.error(
+                "Failed to place new SL order",
+                symbol=symbol,
+                new_sl_price=new_sl_price,
+                error=str(e),
+                exc_info=True,
+            )
 
     # ========== LEGACY: In-memory trailing stop ==========
 
@@ -424,20 +591,25 @@ class TrailingStopMonitor:
             logger.error("Failed to get hard stop", position_id=position.id, error=str(e))
             return None
 
-    def _finalize_close(self, position: PnLLedger, exit_price: float, reason: str, session):
+    def _finalize_close(self, position: PnLLedger, exit_price: float, reason: str, session,
+                        actual_pnl: float = None, actual_fees: float = None):
         """Update PnLLedger and trades DB after position close."""
-        is_long = position.side == "LONG"
-
-        if is_long:
-            raw_pnl = (exit_price - position.entry_price) * position.quantity * position.leverage
+        if actual_pnl is not None and actual_fees is not None:
+            # Use actual Binance data (most accurate)
+            realized_pnl = actual_pnl - actual_fees
+            total_fees = actual_fees
         else:
-            raw_pnl = (position.entry_price - exit_price) * position.quantity * position.leverage
+            # Estimate from entry/exit prices
+            is_long = position.side == "LONG"
+            if is_long:
+                raw_pnl = (exit_price - position.entry_price) * position.quantity * position.leverage
+            else:
+                raw_pnl = (position.entry_price - exit_price) * position.quantity * position.leverage
 
-        # Estimate fees (entry + exit)
-        notional = position.entry_price * position.quantity
-        fee_rate = self.taker_fee_bps / 10000
-        total_fees = notional * fee_rate * 2
-        realized_pnl = raw_pnl - total_fees
+            notional = position.entry_price * position.quantity
+            fee_rate = self.taker_fee_bps / 10000
+            total_fees = notional * fee_rate * 2
+            realized_pnl = raw_pnl - total_fees
 
         holding_seconds = int((datetime.utcnow() - position.entry_time).total_seconds())
 
@@ -478,9 +650,10 @@ class TrailingStopMonitor:
             holding_time_seconds=holding_seconds,
         )
 
-        # Clean up legacy tracking state
+        # Clean up tracking state
         self.peak_prices.pop(position.id, None)
         self.position_states.pop(position.id, None)
+        self.sl_states.pop(position.id, None)
 
     def _close_position(self, position: PnLLedger, current_price: float, reason: str, session):
         """Close a legacy position via Binance API (or paper) and update PnLLedger."""

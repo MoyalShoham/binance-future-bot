@@ -102,6 +102,11 @@ class RiskManagerAgent(BaseAgent):
         self.vol_breaker_trigger_pct = vol_breaker.get("trigger_pct", 0.10)
         self.vol_breaker_cooldown_seconds = vol_breaker.get("cooldown_seconds", 300)
 
+        # Multi-position support
+        trading_config = config.get("trading", {})
+        self.max_concurrent_positions = trading_config.get("max_concurrent_positions", 3)
+        self.per_position_exposure_pct = self.max_portfolio_exposure_pct / self.max_concurrent_positions
+
         # Funding rate filter
         self.max_funding_rate_pct = risk_config.get("max_funding_rate_pct", 0.0005)
 
@@ -410,13 +415,39 @@ class RiskManagerAgent(BaseAgent):
         trading_decision: Dict[str, Any],
         account_status: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Check 4: Max Portfolio Exposure"""
+        """Check 4: Max Portfolio Exposure
 
+        current_exposure is already in margin units (notional / leverage).
+        new_position_size is notional — convert to margin before comparing.
+        Also enforce per-position cap (max_exposure / max_concurrent_positions).
+        """
         current_exposure = account_status.get("current_exposure", 0)
         total_equity = max(account_status.get("total_equity", 1), 0.01)
-        new_position_size = trading_decision.get("position_size_usdt", 0)
+        new_position_notional = trading_decision.get("position_size_usdt", 0)
+        leverage = trading_decision.get("leverage", self.config.get("trading", {}).get("default_leverage", 3))
 
-        total_exposure = current_exposure + new_position_size
+        # Convert notional to margin for apples-to-apples comparison
+        new_position_margin = new_position_notional / leverage
+
+        # Check per-position cap
+        per_position_pct = new_position_margin / total_equity
+        per_position_limit = self.per_position_exposure_pct
+        if per_position_pct > per_position_limit:
+            return {
+                "passed": False,
+                "current_value": per_position_pct,
+                "limit": per_position_limit,
+                "severity": "warning",
+                "message": (
+                    f"Single position margin {per_position_pct:.2%} exceeds per-position limit "
+                    f"{per_position_limit:.2%} ({self.max_portfolio_exposure_pct:.0%}/{self.max_concurrent_positions})"
+                ),
+                "current_exposure_usdt": current_exposure,
+                "new_exposure_usdt": current_exposure + new_position_margin,
+            }
+
+        # Check total portfolio exposure
+        total_exposure = current_exposure + new_position_margin
         exposure_pct = total_exposure / total_equity
 
         passed = exposure_pct <= self.max_portfolio_exposure_pct
@@ -956,10 +987,22 @@ class RiskManagerAgent(BaseAgent):
         # Cap position size so margin fits within available balance
         leverage = modified_params.get("leverage", trading_decision.get("leverage", 1))
         available = account_status.get("available_balance", 0)
+        total_equity = max(account_status.get("total_equity", 1), 0.01)
         final_size = modified_params.get("position_size_usdt", requested_size)
-        max_notional = available * leverage * 0.80  # Use 80% of margin capacity
+
+        # Per-position budget: equity * per_position_exposure_pct * leverage
+        per_position_max_notional = total_equity * self.per_position_exposure_pct * leverage
+        # Also cap by available margin
+        max_notional_from_available = available * leverage * 0.80
+        max_notional = min(per_position_max_notional, max_notional_from_available)
+
         if final_size > max_notional and max_notional > 0:
             modified_params["position_size_usdt"] = round(max_notional, 2)
+
+        # Enforce Binance Futures minimum notional ($100)
+        final_size = modified_params.get("position_size_usdt", requested_size)
+        if final_size < 100.0:
+            modified_params["position_size_usdt"] = 100.0
 
         return modified_params
 

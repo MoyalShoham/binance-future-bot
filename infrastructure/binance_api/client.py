@@ -646,6 +646,48 @@ class BinanceFuturesClient:
             self.logger.error("Failed to get exchange info", error=str(e))
             raise
 
+    # ========== Account Trades ==========
+
+    def get_recent_trades(self, symbol: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Get recent account trades (fills) for a symbol.
+
+        Uses futures_account_trades to get actual fill prices, realized PnL,
+        and commissions — much more accurate than algo order triggerPrice.
+
+        Args:
+            symbol: Trading symbol
+            limit: Number of recent trades to return
+
+        Returns:
+            List of trade dicts with price, qty, realizedPnl, commission, etc.
+        """
+        try:
+            trades = self.client.futures_account_trades(symbol=symbol, limit=limit)
+
+            parsed = []
+            for t in trades:
+                parsed.append({
+                    "id": t.get("id"),
+                    "order_id": t.get("orderId"),
+                    "symbol": t.get("symbol"),
+                    "side": t.get("side"),
+                    "price": float(t.get("price", 0)),
+                    "qty": float(t.get("qty", 0)),
+                    "realized_pnl": float(t.get("realizedPnl", 0)),
+                    "commission": float(t.get("commission", 0)),
+                    "commission_asset": t.get("commissionAsset", "USDT"),
+                    "time": t.get("time"),
+                    "buyer": t.get("buyer", False),
+                    "maker": t.get("maker", False),
+                })
+
+            return parsed
+
+        except BinanceAPIException as e:
+            self.logger.error("Failed to get recent trades", symbol=symbol, error=str(e))
+            raise
+
     # ========== Utility ==========
 
     def ping(self) -> bool:
