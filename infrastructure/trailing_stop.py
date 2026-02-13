@@ -46,11 +46,12 @@ class TrailingStopMonitor:
     - When SL hit, position closes
     """
 
-    def __init__(self, binance_client, db_session: DatabaseSession, config: Dict[str, Any], trades_db=None):
+    def __init__(self, binance_client, db_session: DatabaseSession, config: Dict[str, Any], trades_db=None, ws_manager=None):
         self.binance_client = binance_client
         self.db_session = db_session
         self.config = config
         self.trades_db = trades_db
+        self.ws_manager = ws_manager
 
         # Trailing stop config
         ts_config = config.get("trailing_stop", {})
@@ -79,7 +80,16 @@ class TrailingStopMonitor:
         self.dsl_trail_step_pct = dynamic_sl_config.get("trail_step_pct", 0.003)
         self.dsl_min_move_pct = dynamic_sl_config.get("min_move_pct", 0.001)
 
-        # Dynamic SL states: {pnl_ledger_id: {"stage": "initial"|"breakeven"|"trailing", "current_sl": float}}
+        # Dynamic TP/SL recalculation config
+        dtp_config = ts_config.get("dynamic_tp_sl", {})
+        self.dtp_enabled = dtp_config.get("enabled", False)
+        self.dtp_recalc_threshold_pct = dtp_config.get("recalc_threshold_pct", 0.004)
+        self.dtp_tp_atr_mult = dtp_config.get("tp_atr_multiplier", 2.0)
+        self.dtp_sl_atr_mult = dtp_config.get("sl_atr_multiplier", 1.0)
+        self.dtp_min_rr = dtp_config.get("min_rr_ratio", 1.5)
+        self.dtp_max_recalcs = dtp_config.get("max_recalcs", 10)
+
+        # Dynamic SL states: {pnl_ledger_id: {"stage": ..., "current_sl": ..., "last_recalc_price": ..., "recalc_count": ..., "current_tp": ...}}
         self.sl_states = {}
 
         # In-memory state for legacy ratcheting: {pnl_ledger_id: {"tp": float, "sl": float, "ratchet_count": int}}
@@ -202,6 +212,10 @@ class TrailingStopMonitor:
         if self.dynamic_sl_enabled and position.sl_order_id and self.execution_mode != "paper":
             self._adjust_dynamic_sl(position, session)
 
+        # Dynamic TP/SL recalculation (ATR-based, both SL and TP)
+        if self.dtp_enabled and position.sl_order_id and position.tp_order_id:
+            self._adjust_dynamic_tp_sl(position, session)
+
     def _handle_sl_tp_triggered(self, position: PnLLedger, session):
         """Position is gone from Binance — use recent trades for accurate fill data."""
         pos_id = position.id
@@ -274,7 +288,7 @@ class TrailingStopMonitor:
             # LAST RESORT: Use current ticker price
             if exit_price <= 0:
                 try:
-                    exit_price = self.binance_client.get_ticker_price(position.symbol)
+                    exit_price = self._get_current_price(position.symbol)
                 except Exception:
                     exit_price = position.entry_price
 
@@ -364,7 +378,7 @@ class TrailingStopMonitor:
                             position_id=pos_id,
                             symbol=position.symbol,
                         )
-                        exit_price = self.binance_client.get_ticker_price(position.symbol)
+                        exit_price = self._get_current_price(position.symbol)
                         self._finalize_close(position, exit_price, "STALE_CLOSED", session)
                         return
                     logger.error("Failed to send market close for time exit", error=error_str, exc_info=True)
@@ -390,7 +404,7 @@ class TrailingStopMonitor:
                     logger.warning("Failed to get fill data for time exit", error=str(e))
 
                 if exit_price is None:
-                    exit_price = self.binance_client.get_ticker_price(position.symbol)
+                    exit_price = self._get_current_price(position.symbol)
 
                 self._finalize_close(position, exit_price, "TIME_EXIT", session,
                                      actual_pnl=actual_pnl, actual_fees=actual_fees,
@@ -398,7 +412,7 @@ class TrailingStopMonitor:
                 return
 
             # Paper mode: estimate from ticker
-            current_price = self.binance_client.get_ticker_price(position.symbol)
+            current_price = self._get_current_price(position.symbol)
             self._finalize_close(position, current_price, "TIME_EXIT", session,
                                  close_quantity=position.quantity)
 
@@ -420,7 +434,7 @@ class TrailingStopMonitor:
         is_long = position.side == "LONG"
 
         try:
-            current_price = self.binance_client.get_ticker_price(position.symbol)
+            current_price = self._get_current_price(position.symbol)
         except Exception:
             return
 
@@ -544,6 +558,197 @@ class TrailingStopMonitor:
                 exc_info=True,
             )
 
+    # ========== DYNAMIC TP/SL RECALCULATION ==========
+
+    def _adjust_dynamic_tp_sl(self, position: PnLLedger, session):
+        """Recalculate both SL and TP using fresh ATR when price moves significantly.
+
+        Triggered when price moves >= recalc_threshold_pct from last recalc price.
+        Fetches current ATR (20 candles of 5m klines), computes new SL and TP.
+        SL only moves forward (tighter). TP can adjust. min R:R enforced.
+        """
+        pos_id = position.id
+        is_long = position.side == "LONG"
+
+        try:
+            current_price = self._get_current_price(position.symbol)
+        except Exception:
+            return
+
+        # Initialize recalc state if needed
+        if pos_id not in self.sl_states:
+            self.sl_states[pos_id] = {
+                "stage": "initial",
+                "current_sl": 0.0,
+            }
+        state = self.sl_states[pos_id]
+
+        if "last_recalc_price" not in state:
+            state["last_recalc_price"] = position.entry_price
+            state["recalc_count"] = 0
+            state["current_tp"] = 0.0
+
+        # Check if price moved enough to trigger recalculation
+        last_recalc = state["last_recalc_price"]
+        if last_recalc <= 0:
+            last_recalc = position.entry_price
+        price_move_pct = abs(current_price - last_recalc) / last_recalc
+        if price_move_pct < self.dtp_recalc_threshold_pct:
+            return
+
+        # Check max recalcs
+        if state["recalc_count"] >= self.dtp_max_recalcs:
+            return
+
+        # Only recalculate when price is moving favorably
+        if is_long and current_price <= position.entry_price:
+            return
+        if not is_long and current_price >= position.entry_price:
+            return
+
+        # Fetch current ATR
+        atr = self._get_current_atr(position.symbol)
+        if atr is None or atr <= 0:
+            return
+
+        # Calculate new levels
+        if is_long:
+            new_sl = current_price - atr * self.dtp_sl_atr_mult
+            new_tp = current_price + atr * self.dtp_tp_atr_mult
+        else:
+            new_sl = current_price + atr * self.dtp_sl_atr_mult
+            new_tp = current_price - atr * self.dtp_tp_atr_mult
+
+        # Enforce SL only moves forward (tighter)
+        current_sl = state["current_sl"]
+        if current_sl > 0:
+            if is_long and new_sl < current_sl:
+                new_sl = current_sl  # Don't loosen SL for longs
+            elif not is_long and new_sl > current_sl:
+                new_sl = current_sl  # Don't loosen SL for shorts
+
+        # Enforce minimum R:R ratio
+        sl_dist = abs(current_price - new_sl)
+        tp_dist = abs(new_tp - current_price)
+        if sl_dist > 0 and tp_dist / sl_dist < self.dtp_min_rr:
+            # Widen TP to maintain min R:R
+            if is_long:
+                new_tp = current_price + sl_dist * self.dtp_min_rr
+            else:
+                new_tp = current_price - sl_dist * self.dtp_min_rr
+
+        # Round prices
+        new_sl = self._round_price(position.symbol, new_sl)
+        new_tp = self._round_price(position.symbol, new_tp)
+
+        # Replace orders on Binance (live mode only)
+        sl_replaced = False
+        tp_replaced = False
+
+        if self.execution_mode != "paper":
+            if current_sl == 0 or new_sl != self._round_price(position.symbol, current_sl):
+                self._replace_sl_order(position, new_sl, session)
+                sl_replaced = True
+
+            current_tp_val = state.get("current_tp", 0)
+            if current_tp_val == 0 or new_tp != self._round_price(position.symbol, current_tp_val):
+                self._replace_tp_order(position, new_tp, session)
+                tp_replaced = True
+
+        # Update state
+        state["current_sl"] = new_sl
+        state["current_tp"] = new_tp
+        state["last_recalc_price"] = current_price
+        state["recalc_count"] += 1
+
+        logger.info(
+            "Dynamic TP/SL recalculated",
+            symbol=position.symbol,
+            side=position.side,
+            current_price=current_price,
+            new_sl=new_sl,
+            new_tp=new_tp,
+            atr=round(atr, 4),
+            recalc_count=state["recalc_count"],
+            sl_replaced=sl_replaced,
+            tp_replaced=tp_replaced,
+        )
+
+    def _get_current_atr(self, symbol: str) -> Optional[float]:
+        """Fetch current ATR(14) from 20 candles of 5m klines. Lightweight ~100ms."""
+        try:
+            klines = self.binance_client.get_klines(symbol=symbol, interval="5m", limit=20)
+            if not klines or len(klines) < 14:
+                return None
+
+            # Calculate ATR(14)
+            true_ranges = []
+            for i in range(1, len(klines)):
+                high = klines[i]["high"]
+                low = klines[i]["low"]
+                prev_close = klines[i - 1]["close"]
+                tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+                true_ranges.append(tr)
+
+            if len(true_ranges) < 14:
+                return None
+
+            # Simple moving average of last 14 true ranges
+            atr = sum(true_ranges[-14:]) / 14
+            return atr
+
+        except Exception as e:
+            logger.warning("Failed to fetch ATR for dynamic TP/SL", symbol=symbol, error=str(e))
+            return None
+
+    def _replace_tp_order(self, position: PnLLedger, new_tp_price: float, session):
+        """Cancel existing TP order and place a new one at new_tp_price."""
+        symbol = position.symbol
+        is_long = position.side == "LONG"
+        close_side = "SELL" if is_long else "BUY"
+
+        new_tp_price = self._round_price(symbol, new_tp_price)
+
+        # Cancel old TP
+        if position.tp_order_id:
+            try:
+                if position.tp_order_id.isdigit():
+                    self.binance_client.cancel_algo_order(symbol, int(position.tp_order_id))
+                else:
+                    self.binance_client.cancel_all_algo_orders(symbol)
+                logger.info("Cancelled old TP order", symbol=symbol, old_tp_id=position.tp_order_id)
+            except Exception as e:
+                logger.warning("Failed to cancel old TP order", symbol=symbol, error=str(e))
+
+        # Place new TP
+        try:
+            result = self.binance_client.create_algo_order(
+                symbol=symbol,
+                side=close_side,
+                order_type="TAKE_PROFIT_MARKET",
+                trigger_price=new_tp_price,
+                close_position=True,
+            )
+
+            new_tp_id = str(result.get("algoId", ""))
+            position.tp_order_id = new_tp_id
+            session.flush()
+
+            logger.info(
+                "TP order replaced",
+                symbol=symbol,
+                new_tp_price=new_tp_price,
+                new_tp_id=new_tp_id,
+            )
+        except Exception as e:
+            logger.error(
+                "Failed to place new TP order",
+                symbol=symbol,
+                new_tp_price=new_tp_price,
+                error=str(e),
+                exc_info=True,
+            )
+
     # ========== LEGACY: Ratcheting TP/SL ==========
 
     def _check_legacy_position(self, position: PnLLedger, session):
@@ -563,7 +768,7 @@ class TrailingStopMonitor:
             return
 
         is_long = position.side == "LONG"
-        current_price = self.binance_client.get_ticker_price(position.symbol)
+        current_price = self._get_current_price(position.symbol)
 
         # === Initialize TP/SL levels for new position ===
         if pos_id not in self.position_levels:
@@ -887,7 +1092,7 @@ class TrailingStopMonitor:
                     binance_side=binance_side,
                 )
                 try:
-                    exit_price = self.binance_client.get_ticker_price(db_pos.symbol)
+                    exit_price = self._get_current_price(db_pos.symbol)
                 except Exception:
                     exit_price = db_pos.entry_price
                 self._finalize_close(db_pos, exit_price, "STALE_CLOSED", session)
@@ -1062,6 +1267,14 @@ class TrailingStopMonitor:
                 session.flush()
                 logger.info("Linked existing Binance TP to DB", symbol=symbol,
                             tp_id=db_pos.tp_order_id)
+
+    def _get_current_price(self, symbol: str) -> float:
+        """Get current price from WebSocket cache, falling back to REST."""
+        if self.ws_manager:
+            ws_price = self.ws_manager.get_price(symbol)
+            if ws_price is not None:
+                return ws_price
+        return self._get_current_price(symbol)
 
     def _get_binance_position_qty(self, symbol: str) -> float:
         """Get actual position quantity from Binance. Returns 0 if no position or on error."""

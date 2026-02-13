@@ -26,6 +26,8 @@ from agents.implementations import (
 from infrastructure.binance_api import BinanceFuturesClient
 from infrastructure.database import init_database, TradesDB
 from infrastructure.symbol_scanner import SymbolScanner
+from infrastructure.websocket_manager import BinanceWebSocketManager
+from infrastructure.regime_detector import RegimeDetector, RegimeState
 
 # Ensure logs directory exists
 os.makedirs("logs", exist_ok=True)
@@ -137,7 +139,7 @@ def initialize_binance_client(config: dict) -> BinanceFuturesClient:
     return client
 
 
-def initialize_agents(config: dict, binance_client: BinanceFuturesClient, db_session, model_router: ModelRouter, trades_db=None) -> dict:
+def initialize_agents(config: dict, binance_client: BinanceFuturesClient, db_session, model_router: ModelRouter, trades_db=None, ws_manager=None, regime_state=None) -> dict:
     """
     Initialize all trading agents.
 
@@ -152,12 +154,12 @@ def initialize_agents(config: dict, binance_client: BinanceFuturesClient, db_ses
         Dict of initialized agents
     """
     agents = {
-        "research_coordinator": ResearchCoordinatorAgent("research-coordinator", config, binance_client, model_router=model_router),
-        "trading_decision": TradingDecisionAgent("trading-decision", config, model_router=model_router, binance_client=binance_client, db_session=db_session),
+        "research_coordinator": ResearchCoordinatorAgent("research-coordinator", config, binance_client, model_router=model_router, ws_manager=ws_manager),
+        "trading_decision": TradingDecisionAgent("trading-decision", config, model_router=model_router, binance_client=binance_client, db_session=db_session, regime_state=regime_state),
         "risk_manager": RiskManagerAgent("risk-manager", config, binance_client, db_session),  # NO model_router - stays rule-based
         "execution_agent": ExecutionAgent("execution-agent", config, binance_client, db_session, model_router=model_router),
         "storage_reporter": StorageReporterAgent("storage-reporter", config, db_session, model_router=model_router, trades_db=trades_db),
-        "emergency_controller": EmergencyControllerAgent("emergency-controller", config, binance_client, db_session, model_router=model_router, trades_db=trades_db),
+        "emergency_controller": EmergencyControllerAgent("emergency-controller", config, binance_client, db_session, model_router=model_router, trades_db=trades_db, ws_manager=ws_manager),
     }
 
     logger.info("Agents initialized", agent_count=len(agents), llm_enabled=config.get("models", {}).get("enabled", True))
@@ -296,8 +298,27 @@ def main():
         # Initialize model router for LLM calls
         model_router = ModelRouter(config.get("models", {}))
 
+        # Initialize WebSocket manager for real-time market data
+        ws_manager = None
+        if config.get("websocket", {}).get("enabled", False):
+            ws_manager = BinanceWebSocketManager(
+                api_key=os.getenv("BINANCE_API_KEY"),
+                api_secret=os.getenv("BINANCE_API_SECRET"),
+                config=config,
+            )
+            ws_manager.start()
+            logger.info("WebSocket manager initialized")
+
+        # Initialize regime detector
+        regime_state = RegimeState()
+        regime_detector = None
+        if config.get("regime_detection", {}).get("enabled", False):
+            regime_detector = RegimeDetector(
+                binance_client, config, regime_state, db_session=db_session
+            )
+
         # Initialize agents
-        agents = initialize_agents(config, binance_client, db_session, model_router, trades_db)
+        agents = initialize_agents(config, binance_client, db_session, model_router, trades_db, ws_manager=ws_manager, regime_state=regime_state)
 
         # Initialize coordinator
         coordinator = TradingCoordinator(config)
@@ -311,6 +332,10 @@ def main():
         emergency_controller = agents.get("emergency_controller")
         if emergency_controller:
             emergency_controller.start_continuous_monitoring()
+
+        # Start regime detector
+        if regime_detector:
+            regime_detector.start()
 
         # Initialize hot symbol scanner
         symbol_scanner = SymbolScanner(binance_client, config)
@@ -339,6 +364,10 @@ def main():
             logger.warning("Could not fetch open positions for symbol list", error=str(e))
 
         logger.info("Trading symbols", symbols=symbols, count=len(symbols))
+
+        # Subscribe WebSocket to initial symbols
+        if ws_manager:
+            ws_manager.subscribe(symbols)
 
         # Run trading cycles
         if args.continuous:
@@ -371,6 +400,10 @@ def main():
                         if s not in symbols:
                             symbols.append(s)
 
+                # Subscribe WebSocket to any new symbols
+                if ws_manager:
+                    ws_manager.subscribe(symbols)
+
                 time.sleep(args.interval)
         else:
             # Single cycle across all symbols
@@ -384,6 +417,12 @@ def main():
         sys.exit(1)
     finally:
         # Cleanup
+        if 'regime_detector' in locals() and regime_detector:
+            regime_detector.stop()
+
+        if 'ws_manager' in locals() and ws_manager:
+            ws_manager.stop()
+
         if 'emergency_controller' in locals() and emergency_controller:
             emergency_controller.stop_continuous_monitoring()
 

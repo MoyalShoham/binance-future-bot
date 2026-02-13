@@ -6,7 +6,7 @@ trading:
   execution_mode: "live"  # paper | live | hybrid
   testnet: false  # Use Binance mainnet for market data
   max_concurrent_positions: 3
-  default_leverage: 3
+  default_leverage: 5
 
   # Scalping configuration
   scalping:
@@ -63,8 +63,8 @@ risk:
   # Leverage limits
   leverage_limits:
     low_volatility: 5     # < 2% volatility
-    medium_volatility: 3   # 2-5% volatility
-    high_volatility: 2     # > 5% volatility
+    medium_volatility: 5   # 2-5% volatility
+    high_volatility: 5     # > 5% volatility
 
   # Correlation limits
   max_correlated_positions: 3  # Max positions with correlation > 0.7
@@ -166,6 +166,9 @@ execution:
   fees:
     maker_bps: 2  # 0.02% maker fee
     taker_bps: 5  # 0.05% taker fee
+    pre_trade_fee_filter:
+      enabled: true
+      fee_buffer_multiplier: 1.5  # Expected profit must be >= 1.5x round-trip fees
 
   # Hybrid mode settings
   hybrid:
@@ -307,8 +310,30 @@ trailing_stop:
     trail_step_pct: 0.004        # SL trails 0.4% behind price
     min_move_pct: 0.001          # Only move SL if change > 0.1%
 
+  # Dynamic TP/SL recalculation (ATR-based, replaces Binance-side orders)
+  dynamic_tp_sl:
+    enabled: true
+    recalc_threshold_pct: 0.004   # Recalculate when price moves 0.4% from last calc
+    use_current_atr: true
+    tp_atr_multiplier: 2.0        # TP = current_price +/- ATR * mult
+    sl_atr_multiplier: 1.0        # SL = current_price -/+ ATR * mult
+    min_rr_ratio: 1.5
+    max_recalcs: 10
+
   # Logging
   log_level_updates: false  # Log each TP/SL level update
+
+# Market Regime Detection (LLM-based, runs every 15 minutes)
+regime_detection:
+  enabled: false  # Requires Anthropic API credits — enable when funded
+  interval_seconds: 900  # 15 minutes
+  model: "claude-haiku-4-5-20251001"
+  fallback_regime: "DEFAULT"  # Used if API call fails
+
+# WebSocket Streaming (supplements REST for real-time price/book data)
+websocket:
+  enabled: true
+  stale_threshold_seconds: 10
 
 # Monitoring & Alerts
 monitoring:

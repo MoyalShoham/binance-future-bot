@@ -471,23 +471,16 @@ class RiskManagerAgent(BaseAgent):
         trading_decision: Dict[str, Any],
         research_summary: Optional[Dict[str, Any]]
     ) -> Dict[str, Any]:
-        """Check 5: Leverage Limit (volatility-adjusted)"""
+        """Check 5: Leverage Limit
+
+        Uses max of configured leverage limits (low/med/high volatility).
+        To re-enable volatility-based branching, set different values in config.
+        """
 
         requested_leverage = trading_decision.get("leverage", 1)
 
-        # Get volatility from research summary
-        volatility_pct = 0.03  # Default: 3%
-        if research_summary:
-            tech_indicators = research_summary.get("technical_indicators", {})
-            volatility_pct = tech_indicators.get("volatility_pct", 0.03)
-
-        # Determine max leverage based on volatility
-        if volatility_pct < 0.02:  # < 2% (low volatility)
-            max_leverage = self.leverage_low_vol
-        elif volatility_pct < 0.05:  # 2-5% (medium volatility)
-            max_leverage = self.leverage_med_vol
-        else:  # > 5% (high volatility)
-            max_leverage = self.leverage_high_vol
+        # Use max of all configured limits — config drives the cap
+        max_leverage = max(self.leverage_low_vol, self.leverage_med_vol, self.leverage_high_vol)
 
         passed = requested_leverage <= max_leverage
 
@@ -497,11 +490,10 @@ class RiskManagerAgent(BaseAgent):
             "limit": max_leverage,
             "severity": "warning" if not passed else "info",
             "message": (
-                f"Leverage {requested_leverage}x exceeds volatility-adjusted limit {max_leverage}x (vol: {volatility_pct:.2%})"
+                f"Leverage {requested_leverage}x exceeds limit {max_leverage}x"
                 if not passed
-                else f"Leverage within limit ({requested_leverage}x / {max_leverage}x, vol: {volatility_pct:.2%})"
+                else f"Leverage within limit ({requested_leverage}x / {max_leverage}x)"
             ),
-            "volatility_pct": volatility_pct
         }
 
     def _check_correlation_limit(

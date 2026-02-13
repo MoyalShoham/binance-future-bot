@@ -50,7 +50,8 @@ class TradingDecisionAgent(BaseAgent):
         config: Dict[str, Any],
         model_router=None,
         binance_client=None,
-        db_session=None
+        db_session=None,
+        regime_state=None
     ):
         """
         Initialize Trading Decision Agent.
@@ -61,10 +62,12 @@ class TradingDecisionAgent(BaseAgent):
             model_router: Optional ModelRouter for LLM enhancement
             binance_client: Optional Binance API client for real balance lookups
             db_session: Optional DatabaseSession for learning from past trades
+            regime_state: Optional RegimeState for market regime overrides
         """
         super().__init__(agent_id, config, model_router=model_router)
         self.binance_client = binance_client
         self.db_session = db_session
+        self.regime_state = regime_state
 
         self.validator = SchemaValidator()
 
@@ -85,7 +88,14 @@ class TradingDecisionAgent(BaseAgent):
 
         # Default leverage and position sizing
         trading_config = config.get("trading", {})
-        self.default_leverage = trading_config.get("default_leverage", 3)
+        self.default_leverage = trading_config.get("default_leverage", 5)
+
+        # Fee filter config
+        fee_config = config.get("execution", {}).get("fees", {})
+        self.taker_bps = fee_config.get("taker_bps", 5)
+        fee_filter_config = fee_config.get("pre_trade_fee_filter", {})
+        self.fee_filter_enabled = fee_filter_config.get("enabled", True)
+        self.fee_buffer_multiplier = fee_filter_config.get("fee_buffer_multiplier", 1.5)
 
         # Confidence threshold for trades
         self.min_confidence = 0.75  # Minimum 75% confidence to trade (was 70%)
@@ -188,11 +198,53 @@ class TradingDecisionAgent(BaseAgent):
             # Select best strategy and make decision (with learning adjustments)
             decision, strategy_id, confidence = self._make_decision(strategy_signals, research_summary)
 
-            # Calculate entry/exit levels
+            # ===== REGIME OVERRIDES =====
+            regime_params = {}
+            if self.regime_state:
+                regime_data = self.regime_state.get()
+                regime_name = regime_data.get("regime", "DEFAULT")
+                regime_params = regime_data.get("params", {})
+
+                if regime_name != "DEFAULT" and decision != "NO_TRADE":
+                    # Direction bias enforcement
+                    direction_bias = regime_params.get("direction_bias")
+                    if direction_bias == "LONG" and decision == "SHORT":
+                        logger.info("Regime direction filter", regime=regime_name, blocked=decision)
+                        decision = "NO_TRADE"
+                    elif direction_bias == "SHORT" and decision == "LONG":
+                        logger.info("Regime direction filter", regime=regime_name, blocked=decision)
+                        decision = "NO_TRADE"
+                    elif direction_bias == "LONG_BIAS" and decision == "SHORT":
+                        confidence -= 0.05  # Soft penalty for going against bias
+                    elif direction_bias == "SHORT_BIAS" and decision == "LONG":
+                        confidence -= 0.05
+
+                    # Min confidence override from regime
+                    regime_min_conf = regime_params.get("min_confidence")
+                    if regime_min_conf and confidence < regime_min_conf and decision != "NO_TRADE":
+                        logger.info(
+                            "Regime confidence filter",
+                            regime=regime_name,
+                            confidence=f"{confidence:.0%}",
+                            min_required=f"{regime_min_conf:.0%}",
+                        )
+                        decision = "NO_TRADE"
+
+                    if regime_name != "DEFAULT":
+                        logger.debug(
+                            "Regime overrides applied",
+                            regime=regime_name,
+                            tp_mult=regime_params.get("tp_multiplier", 1.0),
+                            sl_mult=regime_params.get("sl_multiplier", 1.0),
+                            size_mult=regime_params.get("position_size_multiplier", 1.0),
+                        )
+
+            # Calculate entry/exit levels (with regime multipliers)
             entry_price, stop_loss, take_profit_levels = self._calculate_levels(
                 research_summary,
                 decision,
-                strategy_id
+                strategy_id,
+                regime_params=regime_params,
             )
 
             # Estimate position size (will be validated by Risk Manager)
@@ -201,6 +253,22 @@ class TradingDecisionAgent(BaseAgent):
                 entry_price,
                 stop_loss
             )
+
+            # Apply regime position size multiplier
+            size_mult = regime_params.get("position_size_multiplier", 1.0)
+            if size_mult != 1.0:
+                position_size_usdt = round(position_size_usdt * size_mult, 2)
+
+            # Fee viability check: reject trades where expected profit < fees * buffer
+            if decision != "NO_TRADE" and self.fee_filter_enabled:
+                fee_viable, fee_reason = self._check_fee_viability(
+                    entry_price, take_profit_levels, position_size_usdt
+                )
+                if not fee_viable:
+                    logger.info("Fee filter rejection", symbol=symbol, reason=fee_reason)
+                    return self._build_no_trade_decision(
+                        symbol, correlation_id, fee_reason, start_time
+                    )
 
             # Calculate risk metrics
             risk_metrics = self._calculate_risk_metrics(
@@ -244,8 +312,11 @@ class TradingDecisionAgent(BaseAgent):
                 model_used = llm_enhancement.get("_model_used", "rule-based")
                 llm_reasoning = llm_enhancement.get("enhanced_reasoning", "")
 
-            # Expected holding time based on strategy
+            # Expected holding time based on strategy (with regime multiplier)
             expected_holding_time = self._get_expected_holding_time(strategy_id)
+            hold_mult = regime_params.get("hold_time_multiplier", 1.0)
+            if hold_mult != 1.0:
+                expected_holding_time = int(expected_holding_time * hold_mult)
 
             # Build Trading Decision
             rule_reasoning = self._generate_reasoning(decision, strategy_id, research_summary, confidence)
@@ -714,12 +785,14 @@ class TradingDecisionAgent(BaseAgent):
         self,
         research_summary: Dict[str, Any],
         decision: str,
-        strategy_id: str
+        strategy_id: str,
+        regime_params: Optional[Dict[str, Any]] = None
     ) -> Tuple[float, float, List[Dict[str, Any]]]:
         """
         Calculate entry, stop loss, and take profit levels.
 
         Uses configurable ATR multipliers with minimum R:R enforcement.
+        Regime multipliers scale the config values when active.
 
         Returns:
             (entry_price, stop_loss, take_profit_levels)
@@ -741,6 +814,11 @@ class TradingDecisionAgent(BaseAgent):
         tp_mult = risk_config.get("tp_atr_multiplier", 2.5)
         min_rr = risk_config.get("min_rr_ratio", 2.0)
         min_sl_dist_pct = risk_config.get("min_sl_distance_pct", 0.003)
+
+        # Apply regime multipliers (scale config values, don't replace)
+        if regime_params:
+            sl_mult *= regime_params.get("sl_multiplier", 1.0)
+            tp_mult *= regime_params.get("tp_multiplier", 1.0)
 
         # Entry: current market price
         entry_price = price
@@ -803,6 +881,8 @@ class TradingDecisionAgent(BaseAgent):
         risk_amount = assumed_equity * risk_pct
 
         # Calculate position size based on stop distance
+        if entry_price <= 0:
+            return 0.0
         stop_distance_pct = abs((entry_price - stop_loss) / entry_price)
 
         if stop_distance_pct > 0:
@@ -998,6 +1078,39 @@ class TradingDecisionAgent(BaseAgent):
                 return True, f"Low-volume hours (UTC {utc_hour}:00) with insufficient liquidity: ${volume_24h:,.0f}"
 
         return False, ""
+
+    def _check_fee_viability(
+        self,
+        entry_price: float,
+        take_profit_levels: List[Dict[str, Any]],
+        position_size_usdt: float
+    ) -> Tuple[bool, str]:
+        """
+        Check if expected profit exceeds round-trip fees * buffer multiplier.
+        Returns (is_viable, reason).
+        """
+        if not take_profit_levels or entry_price <= 0 or position_size_usdt <= 0:
+            return True, ""
+
+        # Round-trip taker fees (entry + exit)
+        round_trip_fee_rate = self.taker_bps / 10000 * 2
+        round_trip_fees = position_size_usdt * round_trip_fee_rate
+
+        # Expected profit from first TP level
+        tp_price = take_profit_levels[0]["price"]
+        tp_distance_pct = abs(tp_price - entry_price) / entry_price
+        expected_profit = position_size_usdt * tp_distance_pct
+
+        min_required = round_trip_fees * self.fee_buffer_multiplier
+
+        if expected_profit < min_required:
+            reason = (
+                f"fee_filter: expected profit ${expected_profit:.4f} < "
+                f"${min_required:.4f} (fees ${round_trip_fees:.4f} x {self.fee_buffer_multiplier}x buffer)"
+            )
+            return False, reason
+
+        return True, ""
 
     def _build_no_trade_decision(
         self,

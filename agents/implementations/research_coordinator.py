@@ -51,7 +51,8 @@ class ResearchCoordinatorAgent(BaseAgent):
         agent_id: str,
         config: Dict[str, Any],
         binance_client: BinanceFuturesClient,
-        model_router=None
+        model_router=None,
+        ws_manager=None
     ):
         """
         Initialize Research Coordinator Agent.
@@ -61,10 +62,12 @@ class ResearchCoordinatorAgent(BaseAgent):
             config: System configuration
             binance_client: Binance API client
             model_router: Optional ModelRouter for LLM enhancement
+            ws_manager: Optional BinanceWebSocketManager for cached market data
         """
         super().__init__(agent_id, config, model_router=model_router)
 
         self.binance_client = binance_client
+        self.ws_manager = ws_manager
         self.validator = SchemaValidator()
 
         # Technical indicators calculator
@@ -220,18 +223,35 @@ class ResearchCoordinatorAgent(BaseAgent):
         higher_tf = HTF_MAP.get(timeframe, "1h")
 
         try:
+            # Try WebSocket cache for ticker and book data (near-zero latency)
+            ws_ticker = None
+            ws_book = None
+            if self.ws_manager:
+                ws_ticker = self.ws_manager.get_ticker(symbol)
+                ws_book = self.ws_manager.get_book_ticker(symbol)
+                if ws_ticker:
+                    logger.debug("Using cached ticker data", symbol=symbol)
+                if ws_book:
+                    logger.debug("Using cached book ticker data", symbol=symbol)
+
             with ThreadPoolExecutor(max_workers=6) as pool:
-                ticker_fut = pool.submit(
-                    self.binance_client.client.futures_ticker, symbol=symbol
-                )
+                # Only fetch ticker/book via REST if WebSocket cache is stale
+                ticker_fut = None
+                book_fut = None
+                if not ws_ticker:
+                    ticker_fut = pool.submit(
+                        self.binance_client.client.futures_ticker, symbol=symbol
+                    )
+                if not ws_book:
+                    book_fut = pool.submit(
+                        self.binance_client.get_order_book, symbol, limit=100
+                    )
+
                 funding_fut = pool.submit(
                     self.binance_client.client.futures_funding_rate, symbol=symbol, limit=1
                 )
                 oi_fut = pool.submit(
                     self.binance_client.client.futures_open_interest, symbol=symbol
-                )
-                book_fut = pool.submit(
-                    self.binance_client.get_order_book, symbol, limit=100
                 )
                 klines_fut = pool.submit(
                     self.binance_client.get_klines,
@@ -242,20 +262,41 @@ class ResearchCoordinatorAgent(BaseAgent):
                     symbol=symbol, interval=higher_tf, limit=50
                 )
 
-            # Collect results (all futures completed after exiting the `with` block)
-            ticker = ticker_fut.result()
+            # Collect results
             funding_rate_data = funding_fut.result()
             open_interest_data = oi_fut.result()
-            order_book_data = book_fut.result()
             klines = klines_fut.result()
             htf_klines = htf_klines_fut.result()
 
-            # Build market data
-            current_price = float(ticker.get("lastPrice", 0))
+            # Build market data from WS cache or REST fallback
+            if ws_ticker:
+                current_price = ws_ticker["price"]
+                volume_24h = ws_ticker["volume_24h"]
+                # price_change_24h_pct not available from mini ticker — compute from open
+                open_price = ws_ticker.get("open", current_price)
+                price_change_pct = (current_price - open_price) / open_price if open_price > 0 else 0
+            else:
+                ticker = ticker_fut.result()
+                current_price = float(ticker.get("lastPrice", 0))
+                volume_24h = float(ticker.get("quoteVolume", 0))
+                price_change_pct = float(ticker.get("priceChangePercent", 0)) / 100
+
+            if ws_book:
+                order_book_data = {
+                    "bid_depth": 0,  # Not available from book ticker stream
+                    "ask_depth": 0,
+                    "imbalance_ratio": 0,
+                    "best_bid": ws_book["best_bid"],
+                    "best_ask": ws_book["best_ask"],
+                    "spread_bps": ws_book["spread_bps"],
+                }
+            else:
+                order_book_data = book_fut.result()
+
             market_data = {
                 "price": current_price,
-                "volume_24h": float(ticker.get("quoteVolume", 0)),
-                "price_change_24h_pct": float(ticker.get("priceChangePercent", 0)) / 100,
+                "volume_24h": volume_24h,
+                "price_change_24h_pct": price_change_pct,
                 "funding_rate": float(funding_rate_data[0].get("fundingRate", 0)) if funding_rate_data else 0,
                 "open_interest": float(open_interest_data.get("openInterest", 0)) * current_price,
                 "order_book": order_book_data,
