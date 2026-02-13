@@ -82,6 +82,31 @@ class TechnicalIndicators:
             "histogram": round(macd.macd_diff().iloc[-1], 2)
         }
 
+        # Bollinger Bands (20-period, 2 std dev)
+        bb = ta.volatility.BollingerBands(df["Close"], window=20, window_dev=2)
+        bb_upper = bb.bollinger_hband().iloc[-1]
+        bb_lower = bb.bollinger_lband().iloc[-1]
+        bb_middle = bb.bollinger_mavg().iloc[-1]
+        bb_bandwidth = (bb_upper - bb_lower) / bb_middle * 100 if bb_middle > 0 else 0
+        bb_pct_b = (df["Close"].iloc[-1] - bb_lower) / (bb_upper - bb_lower) if (bb_upper - bb_lower) > 0 else 0.5
+
+        # Previous bandwidth for squeeze detection (contracting check)
+        prev_bb_bandwidth = 0
+        if len(df) >= 3:
+            prev_upper = bb.bollinger_hband().iloc[-2]
+            prev_lower = bb.bollinger_lband().iloc[-2]
+            prev_mid = bb.bollinger_mavg().iloc[-2]
+            prev_bb_bandwidth = (prev_upper - prev_lower) / prev_mid * 100 if prev_mid > 0 else 0
+
+        indicators["bollinger"] = {
+            "upper": round(float(bb_upper), 2),
+            "lower": round(float(bb_lower), 2),
+            "middle": round(float(bb_middle), 2),
+            "bandwidth": round(float(bb_bandwidth), 4),
+            "pct_b": round(float(bb_pct_b), 4),
+            "prev_bandwidth": round(float(prev_bb_bandwidth), 4),
+        }
+
         # ATR (Average True Range) - use 6 decimal places to avoid rounding to 0 for low-price coins
         indicators["atr"] = round(ta.volatility.average_true_range(
             df["High"],

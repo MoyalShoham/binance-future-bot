@@ -88,6 +88,12 @@ class TrailingStopMonitor:
         self.dtp_sl_atr_mult = dtp_config.get("sl_atr_multiplier", 1.0)
         self.dtp_min_rr = dtp_config.get("min_rr_ratio", 1.5)
         self.dtp_max_recalcs = dtp_config.get("max_recalcs", 10)
+        self.dtp_tp_proximity_trigger_pct = dtp_config.get("tp_proximity_trigger_pct", 0.20)
+
+        # Leverage-based TP config
+        risk_config = config.get("risk", {})
+        self.leverage_based_tp = risk_config.get("leverage_based_tp", False)
+        self.default_leverage = config.get("trading", {}).get("default_leverage", 5)
 
         # Dynamic SL states: {pnl_ledger_id: {"stage": ..., "current_sl": ..., "last_recalc_price": ..., "recalc_count": ..., "current_tp": ...}}
         self.sl_states = {}
@@ -593,7 +599,19 @@ class TrailingStopMonitor:
         if last_recalc <= 0:
             last_recalc = position.entry_price
         price_move_pct = abs(current_price - last_recalc) / last_recalc
-        if price_move_pct < self.dtp_recalc_threshold_pct:
+
+        # TP proximity trigger: recalc when within X% of remaining TP distance
+        tp_proximity_triggered = False
+        current_tp_val = state.get("current_tp", 0)
+        if current_tp_val > 0 and self.dtp_tp_proximity_trigger_pct > 0:
+            remaining_tp_dist = abs(current_tp_val - current_price)
+            total_tp_dist = abs(current_tp_val - position.entry_price)
+            if total_tp_dist > 0:
+                remaining_pct = remaining_tp_dist / total_tp_dist
+                if remaining_pct <= self.dtp_tp_proximity_trigger_pct:
+                    tp_proximity_triggered = True
+
+        if not tp_proximity_triggered and price_move_pct < self.dtp_recalc_threshold_pct:
             return
 
         # Check max recalcs
@@ -611,13 +629,24 @@ class TrailingStopMonitor:
         if atr is None or atr <= 0:
             return
 
-        # Calculate new levels
+        # Calculate new SL from ATR
         if is_long:
             new_sl = current_price - atr * self.dtp_sl_atr_mult
-            new_tp = current_price + atr * self.dtp_tp_atr_mult
         else:
             new_sl = current_price + atr * self.dtp_sl_atr_mult
-            new_tp = current_price - atr * self.dtp_tp_atr_mult
+
+        # Calculate new TP: leverage-based or ATR-based
+        leverage = getattr(position, 'leverage', self.default_leverage) or self.default_leverage
+        sl_dist = abs(current_price - new_sl)
+        if self.leverage_based_tp:
+            tp_dist = sl_dist * leverage
+        else:
+            tp_dist = atr * self.dtp_tp_atr_mult
+
+        if is_long:
+            new_tp = current_price + tp_dist
+        else:
+            new_tp = current_price - tp_dist
 
         # Enforce SL only moves forward (tighter)
         current_sl = state["current_sl"]
@@ -626,6 +655,14 @@ class TrailingStopMonitor:
                 new_sl = current_sl  # Don't loosen SL for longs
             elif not is_long and new_sl > current_sl:
                 new_sl = current_sl  # Don't loosen SL for shorts
+
+        # Enforce TP only extends further (never pull closer to entry)
+        current_tp_val = state.get("current_tp", 0)
+        if current_tp_val > 0:
+            if is_long and new_tp < current_tp_val:
+                new_tp = current_tp_val  # Don't pull TP closer for longs
+            elif not is_long and new_tp > current_tp_val:
+                new_tp = current_tp_val  # Don't pull TP closer for shorts
 
         # Enforce minimum R:R ratio
         sl_dist = abs(current_price - new_sl)
@@ -669,6 +706,9 @@ class TrailingStopMonitor:
             new_sl=new_sl,
             new_tp=new_tp,
             atr=round(atr, 4),
+            leverage=leverage,
+            leverage_based_tp=self.leverage_based_tp,
+            tp_proximity_triggered=tp_proximity_triggered,
             recalc_count=state["recalc_count"],
             sl_replaced=sl_replaced,
             tp_replaced=tp_replaced,
@@ -1274,7 +1314,7 @@ class TrailingStopMonitor:
             ws_price = self.ws_manager.get_price(symbol)
             if ws_price is not None:
                 return ws_price
-        return self._get_current_price(symbol)
+        return self.binance_client.get_ticker_price(symbol)
 
     def _get_binance_position_qty(self, symbol: str) -> float:
         """Get actual position quantity from Binance. Returns 0 if no position or on error."""

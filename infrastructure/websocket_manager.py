@@ -13,7 +13,9 @@ Klines are NOT streamed — REST is used for indicator calculation
 """
 
 import time
+import asyncio
 import threading
+import warnings
 from typing import Dict, Any, Optional, Set
 import structlog
 
@@ -137,9 +139,27 @@ class BinanceWebSocketManager:
                 logger.warning("Failed to subscribe WebSocket", symbol=symbol, error=str(e))
 
     def stop(self):
-        """Stop all WebSocket streams."""
+        """Stop all WebSocket streams.
+
+        Suppresses 'fail_connection' AttributeError from python-binance/websockets
+        version mismatch (cosmetic error during shutdown, no data impact).
+        """
         if self._twm and self._started:
             try:
+                # Suppress asyncio "Task exception was never retrieved" warnings
+                # caused by python-binance calling fail_connection() on newer websockets
+                loop = getattr(self._twm, '_loop', None)
+                if loop and hasattr(loop, 'set_exception_handler'):
+                    def _shutdown_exception_handler(loop, context):
+                        exc = context.get("exception")
+                        if isinstance(exc, AttributeError) and "fail_connection" in str(exc):
+                            return  # Suppress known shutdown error
+                        loop.default_exception_handler(context)
+                    try:
+                        loop.call_soon_threadsafe(loop.set_exception_handler, _shutdown_exception_handler)
+                    except RuntimeError:
+                        pass  # Loop already closed
+
                 self._twm.stop()
                 logger.info("WebSocket manager stopped")
             except Exception as e:

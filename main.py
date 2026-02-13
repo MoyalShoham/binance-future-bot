@@ -37,6 +37,11 @@ os.makedirs("logs", exist_ok=True)
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.DEBUG)
 
+# Silence noisy third-party loggers (websockets logs every frame at DEBUG,
+# fills log file on Windows causing PermissionError on rotation)
+logging.getLogger("websockets").setLevel(logging.WARNING)
+logging.getLogger("binance").setLevel(logging.WARNING)
+
 # Console handler
 console_handler = logging.StreamHandler(sys.stderr)
 console_handler.setLevel(logging.INFO)
@@ -416,6 +421,11 @@ def main():
         logger.error("Fatal error", error=str(e), exc_info=True)
         sys.exit(1)
     finally:
+        # Suppress asyncio "Task exception was never retrieved" noise during shutdown
+        # (python-binance/websockets version mismatch — cosmetic, no impact)
+        import warnings
+        warnings.filterwarnings("ignore", category=RuntimeWarning, message=".*was never retrieved.*")
+
         # Cleanup
         if 'regime_detector' in locals() and regime_detector:
             regime_detector.stop()

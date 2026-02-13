@@ -74,9 +74,10 @@ risk:
 
   # SL/TP distance multipliers (ATR-based)
   sl_atr_multiplier: 1.0       # Tighter SL (was 1.5)
-  tp_atr_multiplier: 2.5       # Wider TP (was 2.0)
+  tp_atr_multiplier: 2.5       # Wider TP (was 2.0) — only used when leverage_based_tp is false
   min_rr_ratio: 2.0            # Enforce minimum R:R
   min_sl_distance_pct: 0.005   # 0.5% floor to prevent too-tight stops
+  leverage_based_tp: true      # TP = SL_distance * leverage (e.g. SL=0.5%, 5x → TP=2.5%)
 
   # Position sizing method
   position_sizing:
@@ -234,6 +235,7 @@ strategies:
     - "ema_crossover_scalp"    # Re-enabled: now has trend strength filter (ATR-normalized EMA spread)
     - "vwap_bounce_scalp"      # Widened: 0.5% zone + volume confirmation + graduated confidence
     - "rsi_pullback_scalp"     # NEW: buy oversold dips in uptrends, sell overbought in downtrends
+    - "bollinger_squeeze_scalp" # NEW: Bollinger Band squeeze breakout
     # orderbook_imbalance_scalp: DISABLED — noise-based signals, no edge
     # momentum_breakout_scalp: DISABLED — needs stronger trend regime filter
 
@@ -264,6 +266,14 @@ strategies:
     rsi_oversold: 40       # Buy zone ceiling (entry when RSI < this in uptrend)
     rsi_overbought: 60     # Sell zone floor (entry when RSI > this in downtrend)
     expected_holding_time_seconds: 180
+
+  bollinger_squeeze_scalp:
+    timeframe: "5m"
+    bb_period: 20
+    bb_std_dev: 2.0
+    squeeze_bandwidth_pct: 3.0   # Squeeze when bandwidth < 3%
+    min_relative_volume: 1.2     # Volume gate for breakout confirmation
+    expected_holding_time_seconds: 240
 
 # Learning from Past Trades
 # The bot automatically learns from its own trade history to improve decisions.
@@ -319,13 +329,14 @@ trailing_stop:
     sl_atr_multiplier: 1.0        # SL = current_price -/+ ATR * mult
     min_rr_ratio: 1.5
     max_recalcs: 10
+    tp_proximity_trigger_pct: 0.20  # Recalc when within 20% of remaining TP distance
 
   # Logging
   log_level_updates: false  # Log each TP/SL level update
 
 # Market Regime Detection (LLM-based, runs every 15 minutes)
 regime_detection:
-  enabled: false  # Requires Anthropic API credits — enable when funded
+  enabled: true  # Claude Haiku classifies market regime every 15min
   interval_seconds: 900  # 15 minutes
   model: "claude-haiku-4-5-20251001"
   fallback_regime: "DEFAULT"  # Used if API call fails

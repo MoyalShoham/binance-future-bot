@@ -404,6 +404,7 @@ class TradingDecisionAgent(BaseAgent):
             "orderbook_imbalance_scalp": self._evaluate_orderbook_imbalance,
             "momentum_breakout_scalp": self._evaluate_momentum_breakout,
             "rsi_pullback_scalp": self._evaluate_rsi_pullback,
+            "bollinger_squeeze_scalp": self._evaluate_bollinger_squeeze,
         }
 
         for strategy_id, evaluator in strategy_evaluators.items():
@@ -726,6 +727,85 @@ class TradingDecisionAgent(BaseAgent):
             "confidence": min(1.0, confidence)
         }
 
+    def _evaluate_bollinger_squeeze(
+        self,
+        research_summary: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Strategy 6: Bollinger Band Squeeze Breakout
+
+        Detects when Bollinger Bands contract (squeeze) then price breaks out.
+        Squeeze = bandwidth < 3% and contracting (current < previous bandwidth).
+
+        Entry:
+        - LONG: price breaks above upper band + volume confirmation + HTF not bearish
+        - SHORT: price breaks below lower band + volume confirmation + HTF not bullish
+
+        Confirmation:
+        - Relative volume >= 1.2
+        - RSI confirms momentum direction
+        - Trend alignment bonus
+        """
+        tech_ind = research_summary.get("technical_indicators", {})
+        market_data = research_summary.get("market_data", {})
+
+        bollinger = tech_ind.get("bollinger", {})
+        if not bollinger:
+            return {"signal": "neutral", "confidence": 0.5}
+
+        upper = bollinger.get("upper", 0)
+        lower = bollinger.get("lower", 0)
+        bandwidth = bollinger.get("bandwidth", 10)
+        prev_bandwidth = bollinger.get("prev_bandwidth", 10)
+        pct_b = bollinger.get("pct_b", 0.5)
+
+        price = market_data.get("price", 0)
+        rsi = tech_ind.get("rsi", 50)
+        htf_trend = tech_ind.get("htf_trend", "neutral")
+        relative_volume = tech_ind.get("relative_volume", 1.0)
+
+        signal = "neutral"
+        confidence = 0.5
+
+        # Squeeze detection: bandwidth < 3% AND contracting
+        is_squeeze = bandwidth < 3.0 and bandwidth < prev_bandwidth
+
+        if not is_squeeze:
+            return {"signal": "neutral", "confidence": 0.5}
+
+        # Volume gate
+        if relative_volume < 1.2:
+            return {"signal": "neutral", "confidence": 0.5}
+
+        # Breakout above upper band
+        if price > upper and pct_b > 1.0 and htf_trend != "bearish":
+            if rsi > 50:
+                signal = "long"
+                confidence = 0.74
+                if htf_trend == "bullish":
+                    confidence += 0.05
+                if relative_volume >= 2.0:
+                    confidence += 0.04
+                if rsi > 60:
+                    confidence += 0.03
+
+        # Breakout below lower band
+        elif price < lower and pct_b < 0.0 and htf_trend != "bullish":
+            if rsi < 50:
+                signal = "short"
+                confidence = 0.74
+                if htf_trend == "bearish":
+                    confidence += 0.05
+                if relative_volume >= 2.0:
+                    confidence += 0.04
+                if rsi < 40:
+                    confidence += 0.03
+
+        return {
+            "signal": signal,
+            "confidence": min(1.0, confidence)
+        }
+
     # ========== DECISION LOGIC ==========
 
     def _make_decision(
@@ -828,8 +908,17 @@ class TradingDecisionAgent(BaseAgent):
         min_sl_distance = entry_price * min_sl_dist_pct
         sl_distance = max(sl_distance, min_sl_distance)
 
-        # Take profit distance: TP multiplier * ATR, enforce min R:R
-        tp_distance = atr * tp_mult
+        # Take profit distance: leverage-based or ATR-based
+        leverage_based_tp = risk_config.get("leverage_based_tp", False)
+        if leverage_based_tp:
+            # TP = SL distance * leverage (R:R naturally equals leverage)
+            tp_distance = sl_distance * self.default_leverage
+            # Regime TP multiplier scales on top (tp_mult not used in this path)
+            if regime_params:
+                tp_distance *= regime_params.get("tp_multiplier", 1.0)
+        else:
+            # ATR-based TP (regime multiplier already applied to tp_mult above)
+            tp_distance = atr * tp_mult
         tp_distance = max(tp_distance, sl_distance * min_rr)
 
         if decision == "LONG":
@@ -1006,6 +1095,7 @@ class TradingDecisionAgent(BaseAgent):
             "orderbook_imbalance_scalp": 90, # 90 seconds
             "momentum_breakout_scalp": 240,  # 4 minutes
             "rsi_pullback_scalp": 180,       # 3 minutes
+            "bollinger_squeeze_scalp": 240,  # 4 minutes
             "none": 0
         }
 
@@ -1034,6 +1124,7 @@ class TradingDecisionAgent(BaseAgent):
             "orderbook_imbalance_scalp": "Order Book Imbalance",
             "momentum_breakout_scalp": "Momentum Breakout",
             "rsi_pullback_scalp": "RSI Trend Pullback",
+            "bollinger_squeeze_scalp": "Bollinger Squeeze Breakout",
         }
 
         strategy_name = strategy_names.get(strategy_id, strategy_id)
