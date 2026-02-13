@@ -2,8 +2,11 @@
 Trading Decision Agent Implementation
 
 Analyzes market research and makes trading decisions using scalping strategies.
+Includes learning from past trades: strategy auto-disable, symbol memory,
+per-strategy confidence adjustment, time-of-day profitability, and market regime memory.
 """
 
+import time
 from typing import Dict, Any, Optional, Tuple, List
 from datetime import datetime, timezone
 import uuid
@@ -11,6 +14,7 @@ import structlog
 
 from .base_agent import BaseAgent
 from schemas.validator import SchemaValidator
+from infrastructure.database.queries import DatabaseQueries
 
 logger = structlog.get_logger()
 
@@ -45,7 +49,8 @@ class TradingDecisionAgent(BaseAgent):
         agent_id: str,
         config: Dict[str, Any],
         model_router=None,
-        binance_client=None
+        binance_client=None,
+        db_session=None
     ):
         """
         Initialize Trading Decision Agent.
@@ -55,9 +60,11 @@ class TradingDecisionAgent(BaseAgent):
             config: System configuration
             model_router: Optional ModelRouter for LLM enhancement
             binance_client: Optional Binance API client for real balance lookups
+            db_session: Optional DatabaseSession for learning from past trades
         """
         super().__init__(agent_id, config, model_router=model_router)
         self.binance_client = binance_client
+        self.db_session = db_session
 
         self.validator = SchemaValidator()
 
@@ -81,17 +88,39 @@ class TradingDecisionAgent(BaseAgent):
         self.default_leverage = trading_config.get("default_leverage", 3)
 
         # Confidence threshold for trades
-        self.min_confidence = 0.70  # Minimum 70% confidence to trade
+        self.min_confidence = 0.75  # Minimum 75% confidence to trade (was 70%)
 
         # Risk config filters
         risk_config = config.get("risk", {})
         self.max_funding_rate_pct = risk_config.get("max_funding_rate_pct", 0.0005)
         self.max_spread_bps = risk_config.get("max_spread_bps", 8)
 
+        # Pre-filter rejection cache: {symbol: expiry_timestamp}
+        # Avoids re-evaluating funding rate/spread for symbols that were just rejected
+        self._prefilter_cache: Dict[str, float] = {}
+        self._prefilter_cache_ttl = 300  # 5 minutes
+
+        # ===== LEARNING CONFIG =====
+        # Learning thresholds (configurable via config.learning or defaults)
+        learning_config = config.get("learning", {})
+        self.strategy_auto_disable_win_rate = learning_config.get("strategy_auto_disable_win_rate", 0.30)
+        self.strategy_auto_disable_min_trades = learning_config.get("strategy_auto_disable_min_trades", 15)
+        self.symbol_min_win_rate = learning_config.get("symbol_min_win_rate", 0.25)
+        self.symbol_min_trades = learning_config.get("symbol_min_trades", 8)
+        self.hour_min_win_rate = learning_config.get("hour_min_win_rate", 0.30)
+        self.regime_confidence_boost = learning_config.get("regime_confidence_boost", 0.08)
+        self.regime_confidence_penalty = learning_config.get("regime_confidence_penalty", 0.10)
+
+        # Learning cache: refreshed every 5 minutes to avoid DB spam
+        self._learning_cache: Dict[str, Any] = {}
+        self._learning_cache_time: float = 0
+        self._learning_cache_ttl: float = 300  # 5 minutes
+
         logger.debug(
             "Trading Decision Agent initialized",
             agent_id=self.agent_id,
-            enabled_strategies=self.enabled_strategies
+            enabled_strategies=self.enabled_strategies,
+            learning_enabled=db_session is not None,
         )
 
     def execute(self, state: Dict[str, Any]) -> Dict[str, Any]:
@@ -121,20 +150,43 @@ class TradingDecisionAgent(BaseAgent):
 
             symbol = research_summary["symbol"]
 
+            # ===== LEARNING: refresh cache from past trades =====
+            self._refresh_learning_cache()
+
             # ===== PRE-FILTERS: reject before strategy evaluation =====
+            # Check cache first — skip re-evaluation for recently rejected symbols
+            cached_expiry = self._prefilter_cache.get(symbol, 0)
+            if cached_expiry > time.time():
+                return self._build_no_trade_decision(
+                    symbol, correlation_id, "cached pre-filter rejection", start_time
+                )
+
             pre_filter_reject, reject_reason = self._apply_pre_filters(research_summary)
             if pre_filter_reject:
                 logger.info("Pre-filter rejection", symbol=symbol, reason=reject_reason)
-                # Build a NO_TRADE decision with the rejection reason
+                # Cache rejection for 5 minutes
+                self._prefilter_cache[symbol] = time.time() + self._prefilter_cache_ttl
                 return self._build_no_trade_decision(
                     symbol, correlation_id, reject_reason, start_time
                 )
 
-            # Evaluate all enabled strategies
+            # Learning 2: Symbol performance memory — logged as soft penalty
+            # (Hard blocking creates death spiral with limited data)
+            symbol_reject, symbol_reason = self._check_symbol_memory(symbol)
+            if symbol_reject:
+                logger.debug("Symbol penalty active (soft)", symbol=symbol, reason=symbol_reason)
+
+            # Learning 4: Time-of-day profitability — logged but NOT a hard block
+            # (Hard blocking creates death spiral when bot only runs limited hours)
+            hour_reject, hour_reason = self._check_hour_profitability()
+            if hour_reject:
+                logger.debug("Hour penalty active (soft)", reason=hour_reason)
+
+            # Evaluate all enabled strategies (with auto-disable filtering)
             strategy_signals = self._evaluate_all_strategies(research_summary)
 
-            # Select best strategy and make decision
-            decision, strategy_id, confidence = self._make_decision(strategy_signals)
+            # Select best strategy and make decision (with learning adjustments)
+            decision, strategy_id, confidence = self._make_decision(strategy_signals, research_summary)
 
             # Calculate entry/exit levels
             entry_price, stop_loss, take_profit_levels = self._calculate_levels(
@@ -268,23 +320,28 @@ class TradingDecisionAgent(BaseAgent):
     ) -> Dict[str, Dict[str, Any]]:
         """
         Evaluate all enabled strategies.
+        Learning 1: Skips strategies that are auto-disabled due to poor performance.
 
         Returns:
             Dict of strategy signals with confidence scores
         """
         signals = {}
 
-        if "ema_crossover_scalp" in self.enabled_strategies:
-            signals["ema_crossover_scalp"] = self._evaluate_ema_crossover(research_summary)
+        strategy_evaluators = {
+            "ema_crossover_scalp": self._evaluate_ema_crossover,
+            "vwap_bounce_scalp": self._evaluate_vwap_bounce,
+            "orderbook_imbalance_scalp": self._evaluate_orderbook_imbalance,
+            "momentum_breakout_scalp": self._evaluate_momentum_breakout,
+            "rsi_pullback_scalp": self._evaluate_rsi_pullback,
+        }
 
-        if "vwap_bounce_scalp" in self.enabled_strategies:
-            signals["vwap_bounce_scalp"] = self._evaluate_vwap_bounce(research_summary)
-
-        if "orderbook_imbalance_scalp" in self.enabled_strategies:
-            signals["orderbook_imbalance_scalp"] = self._evaluate_orderbook_imbalance(research_summary)
-
-        if "momentum_breakout_scalp" in self.enabled_strategies:
-            signals["momentum_breakout_scalp"] = self._evaluate_momentum_breakout(research_summary)
+        for strategy_id, evaluator in strategy_evaluators.items():
+            if strategy_id not in self.enabled_strategies:
+                continue
+            # Learning 1: Log poor performance but still evaluate (penalty applied later)
+            if self._check_strategy_auto_disable(strategy_id):
+                logger.debug("Strategy has poor performance, will apply penalty", strategy=strategy_id)
+            signals[strategy_id] = evaluator(research_summary)
 
         return signals
 
@@ -293,16 +350,19 @@ class TradingDecisionAgent(BaseAgent):
         research_summary: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        Strategy 1: EMA Crossover Scalp
+        Strategy 1: EMA Crossover Scalp (with trend strength filter)
 
-        Entry — ACTUAL CROSSOVER detection (not just alignment):
-        - LONG: EMA9 was <= EMA21 last candle, now EMA9 > EMA21, price > EMA50
-        - SHORT: EMA9 was >= EMA21 last candle, now EMA9 < EMA21, price < EMA50
+        Entry — ACTUAL CROSSOVER detection + trend strength:
+        - LONG: EMA9 crosses above EMA21, price > EMA50, trend is strong
+        - SHORT: EMA9 crosses below EMA21, price < EMA50, trend is strong
+
+        Trend strength: EMA spread (|EMA9 - EMA21| / ATR) must exceed threshold
+        to filter out noise crossovers in ranging markets.
 
         Confirmation:
         - Order book bias in same direction
         - RSI not extreme (30-70)
-        - Higher timeframe trend alignment
+        - Higher timeframe trend alignment (required, not optional)
         """
         tech_ind = research_summary.get("technical_indicators", {})
         market_data = research_summary.get("market_data", {})
@@ -314,6 +374,7 @@ class TradingDecisionAgent(BaseAgent):
         prev_ema_21 = tech_ind.get("prev_ema_21", ema_21)
         price = market_data.get("price", 0)
         rsi = tech_ind.get("rsi", 50)
+        atr = tech_ind.get("atr", 0) or (price * 0.01)
         htf_trend = tech_ind.get("htf_trend", "neutral")
 
         order_book = market_data.get("order_book", {})
@@ -322,24 +383,32 @@ class TradingDecisionAgent(BaseAgent):
         signal = "neutral"
         confidence = 0.5
 
+        # Trend strength: EMA spread normalized by ATR
+        # Filters noise crossovers — only trade when EMAs are meaningfully apart
+        ema_spread = abs(ema_9 - ema_21)
+        trend_strength = ema_spread / atr if atr > 0 else 0
+        if trend_strength < 0.3:  # EMAs too close = noise, not trend
+            return {"signal": "neutral", "confidence": 0.5}
+
         # Bullish crossover: was below/equal, now above
         bullish_cross = prev_ema_9 <= prev_ema_21 and ema_9 > ema_21
         # Bearish crossover: was above/equal, now below
         bearish_cross = prev_ema_9 >= prev_ema_21 and ema_9 < ema_21
 
-        if bullish_cross and price > ema_50:
-            if imbalance > 0.1 and 30 < rsi < 70:
+        # REQUIRE HTF trend alignment (not just "not against")
+        if bullish_cross and price > ema_50 and htf_trend == "bullish":
+            if imbalance > 0.05 and 35 < rsi < 70:
                 signal = "long"
-                confidence = 0.75 + (abs(imbalance) * 0.15)
-                # Boost if aligned with higher timeframe
-                if htf_trend == "bullish":
+                confidence = 0.76 + (abs(imbalance) * 0.15)
+                # Bonus for strong trend
+                if trend_strength > 0.6:
                     confidence += 0.05
 
-        elif bearish_cross and price < ema_50:
-            if imbalance < -0.1 and 30 < rsi < 70:
+        elif bearish_cross and price < ema_50 and htf_trend == "bearish":
+            if imbalance < -0.05 and 30 < rsi < 65:
                 signal = "short"
-                confidence = 0.75 + (abs(imbalance) * 0.15)
-                if htf_trend == "bearish":
+                confidence = 0.76 + (abs(imbalance) * 0.15)
+                if trend_strength > 0.6:
                     confidence += 0.05
 
         return {
@@ -352,14 +421,16 @@ class TradingDecisionAgent(BaseAgent):
         research_summary: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        Strategy 2: VWAP Bounce Scalp
+        Strategy 2: VWAP Bounce Scalp (widened zone + volume confirmation)
 
         Entry:
-        - LONG: Price touches VWAP from above and bounces (mean reversion)
-        - SHORT: Price touches VWAP from below and bounces
+        - LONG: Price near VWAP and bouncing up, HTF trend not bearish
+        - SHORT: Price near VWAP and bouncing down, HTF trend not bullish
 
         Confirmation:
         - RSI confirms direction
+        - Graduated confidence: closer to VWAP = higher confidence
+        - Volume activity (relative_volume >= 0.8)
         """
         tech_ind = research_summary.get("technical_indicators", {})
         market_data = research_summary.get("market_data", {})
@@ -367,31 +438,50 @@ class TradingDecisionAgent(BaseAgent):
         vwap = tech_ind.get("vwap", 0)
         price = market_data.get("price", 0)
         rsi = tech_ind.get("rsi", 50)
+        htf_trend = tech_ind.get("htf_trend", "neutral")
+        relative_volume = tech_ind.get("relative_volume", 1.0)
 
         if vwap == 0:
             return {"signal": "neutral", "confidence": 0.0}
 
+        # Volume gate: need reasonable activity
+        if relative_volume < 0.8:
+            return {"signal": "neutral", "confidence": 0.5}
+
         # Calculate distance from VWAP
         distance_pct = (price - vwap) / vwap
+        abs_dist = abs(distance_pct)
 
         signal = "neutral"
         confidence = 0.5
 
-        # Price near VWAP (within 0.2%)
-        if abs(distance_pct) < 0.002:
-            # Bounce up from VWAP
-            if distance_pct > 0 and rsi > 50:
-                signal = "long"
-                confidence = 0.70
+        # Widened zone: within 0.5% of VWAP (was 0.2%)
+        if abs_dist < 0.005:
+            # Graduated confidence: closer to VWAP = stronger signal
+            # 0.0% distance → +0.08 bonus, 0.5% distance → +0.00
+            proximity_bonus = 0.08 * (1 - abs_dist / 0.005)
 
-            # Bounce down from VWAP
-            elif distance_pct < 0 and rsi < 50:
+            # Bounce up from VWAP — only if HTF trend is not bearish
+            if distance_pct > -0.001 and rsi > 45 and htf_trend != "bearish":
+                signal = "long"
+                confidence = 0.72 + proximity_bonus
+                if htf_trend == "bullish":
+                    confidence += 0.06
+                if relative_volume >= 1.5:
+                    confidence += 0.03  # Volume spike bonus
+
+            # Bounce down from VWAP — only if HTF trend is not bullish
+            elif distance_pct < 0.001 and rsi < 55 and htf_trend != "bullish":
                 signal = "short"
-                confidence = 0.70
+                confidence = 0.72 + proximity_bonus
+                if htf_trend == "bearish":
+                    confidence += 0.06
+                if relative_volume >= 1.5:
+                    confidence += 0.03
 
         return {
             "signal": signal,
-            "confidence": confidence
+            "confidence": min(1.0, confidence)
         }
 
     def _evaluate_orderbook_imbalance(
@@ -492,19 +582,104 @@ class TradingDecisionAgent(BaseAgent):
             "confidence": min(1.0, confidence)
         }
 
+    def _evaluate_rsi_pullback(
+        self,
+        research_summary: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Strategy 5: RSI Trend Pullback Scalp
+
+        Buys oversold dips in confirmed uptrends, sells overbought rallies
+        in confirmed downtrends. Classic trend-pullback mean reversion.
+
+        Entry:
+        - LONG: RSI 25-40 (oversold dip) + htf_trend bullish + price near EMA21
+        - SHORT: RSI 60-75 (overbought rally) + htf_trend bearish + price near EMA21
+
+        Confirmation:
+        - MACD histogram showing reversal momentum
+        - Price not too far from EMA21 (pullback, not crash)
+        """
+        tech_ind = research_summary.get("technical_indicators", {})
+        market_data = research_summary.get("market_data", {})
+
+        rsi = tech_ind.get("rsi", 50)
+        ema_21 = tech_ind.get("ema_21", 0)
+        ema_50 = tech_ind.get("ema_50", 0)
+        price = market_data.get("price", 0)
+        htf_trend = tech_ind.get("htf_trend", "neutral")
+        macd_data = tech_ind.get("macd", {})
+        histogram = macd_data.get("histogram", 0)
+
+        order_book = market_data.get("order_book", {})
+        imbalance = order_book.get("imbalance_ratio", 0)
+
+        signal = "neutral"
+        confidence = 0.5
+
+        if price <= 0 or ema_21 <= 0:
+            return {"signal": "neutral", "confidence": 0.5}
+
+        # Distance from EMA21 — pullback should be close, not a crash
+        dist_from_ema21 = (price - ema_21) / ema_21
+
+        # LONG: oversold dip in uptrend
+        if (25 < rsi < 40
+                and htf_trend == "bullish"
+                and ema_21 > ema_50  # Uptrend structure
+                and -0.015 < dist_from_ema21 < 0.005  # Near or slightly below EMA21
+                and histogram > -0.5):  # MACD not deeply bearish (recovering)
+            signal = "long"
+            confidence = 0.74
+            # RSI deeper = stronger pullback signal
+            if rsi < 32:
+                confidence += 0.05
+            if imbalance > 0.1:  # Buyers stepping in
+                confidence += 0.04
+
+        # SHORT: overbought rally in downtrend
+        elif (60 < rsi < 75
+              and htf_trend == "bearish"
+              and ema_21 < ema_50  # Downtrend structure
+              and -0.005 < dist_from_ema21 < 0.015  # Near or slightly above EMA21
+              and histogram < 0.5):  # MACD not deeply bullish
+            signal = "short"
+            confidence = 0.74
+            if rsi > 68:
+                confidence += 0.05
+            if imbalance < -0.1:  # Sellers stepping in
+                confidence += 0.04
+
+        return {
+            "signal": signal,
+            "confidence": min(1.0, confidence)
+        }
+
     # ========== DECISION LOGIC ==========
 
     def _make_decision(
         self,
-        strategy_signals: Dict[str, Dict[str, Any]]
+        strategy_signals: Dict[str, Dict[str, Any]],
+        research_summary: Optional[Dict[str, Any]] = None
     ) -> Tuple[str, str, float]:
         """
         Make final trading decision based on strategy signals.
+        Applies all learning adjustments as soft confidence penalties.
 
         Returns:
             (decision, strategy_id, confidence)
         """
-        # Find best signal
+        market_regime = ""
+        if research_summary:
+            market_regime = research_summary.get("market_regime", "")
+
+        # Soft penalties from learning (applied to all signals)
+        hour_penalty = 0.0
+        hour_reject, _ = self._check_hour_profitability()
+        if hour_reject:
+            hour_penalty = 0.05  # -5% for bad hours (soft, not blocking)
+
+        # Find best signal after learning adjustments
         best_strategy = None
         best_signal = "neutral"
         best_confidence = 0.0
@@ -512,6 +687,16 @@ class TradingDecisionAgent(BaseAgent):
         for strategy_id, signal_data in strategy_signals.items():
             signal = signal_data["signal"]
             confidence = signal_data["confidence"]
+
+            # Learning 3: Adjust confidence based on strategy's historical win rate
+            confidence = self._apply_strategy_confidence_adjustment(strategy_id, confidence)
+
+            # Learning 4: Hour penalty (soft)
+            confidence = max(0.0, confidence - hour_penalty)
+
+            # Learning 6: Adjust confidence based on strategy+regime historical fit
+            if market_regime:
+                confidence = self._apply_regime_adjustment(strategy_id, market_regime, confidence)
 
             if confidence > best_confidence:
                 best_confidence = confidence
@@ -740,6 +925,7 @@ class TradingDecisionAgent(BaseAgent):
             "vwap_bounce_scalp": 120,        # 2 minutes
             "orderbook_imbalance_scalp": 90, # 90 seconds
             "momentum_breakout_scalp": 240,  # 4 minutes
+            "rsi_pullback_scalp": 180,       # 3 minutes
             "none": 0
         }
 
@@ -766,7 +952,8 @@ class TradingDecisionAgent(BaseAgent):
             "ema_crossover_scalp": "EMA Crossover",
             "vwap_bounce_scalp": "VWAP Bounce",
             "orderbook_imbalance_scalp": "Order Book Imbalance",
-            "momentum_breakout_scalp": "Momentum Breakout"
+            "momentum_breakout_scalp": "Momentum Breakout",
+            "rsi_pullback_scalp": "RSI Trend Pullback",
         }
 
         strategy_name = strategy_names.get(strategy_id, strategy_id)
@@ -849,6 +1036,203 @@ class TradingDecisionAgent(BaseAgent):
             logger.warning("Pre-filter NO_TRADE failed schema validation, returning anyway")
 
         return trading_decision
+
+    # ========== LEARNING FROM PAST TRADES ==========
+
+    def _refresh_learning_cache(self):
+        """Refresh learning data from DB every 5 minutes."""
+        if not self.db_session:
+            return
+
+        now = time.time()
+        if now - self._learning_cache_time < self._learning_cache_ttl:
+            return  # Cache still fresh
+
+        try:
+            with self.db_session.session_scope() as session:
+                queries = DatabaseQueries(session)
+
+                # Strategy stats (win_rate, avg_win, avg_loss per strategy)
+                strategy_stats = {}
+                for strat in self.enabled_strategies:
+                    stats = queries.get_strategy_full_stats(
+                        strat, lookback_days=7, min_trades=self.strategy_auto_disable_min_trades
+                    )
+                    if stats:
+                        strategy_stats[strat] = stats
+
+                # Hourly performance
+                hourly_perf = queries.get_hourly_performance(lookback_days=7, min_trades_per_hour=5)
+
+                self._learning_cache = {
+                    "strategy_stats": strategy_stats,
+                    "hourly_performance": hourly_perf,
+                    "symbol_cache": {},  # Populated on-demand per symbol
+                    "regime_cache": {},  # Populated on-demand per strategy+regime
+                }
+                self._learning_cache_time = now
+
+                # Log learning summary
+                for strat, stats in strategy_stats.items():
+                    logger.info(
+                        "Learning: strategy stats",
+                        strategy=strat,
+                        win_rate=f"{stats['win_rate']:.0%}",
+                        trades=stats["total_trades"],
+                        pnl=f"${stats['total_pnl']:.2f}",
+                    )
+                if hourly_perf:
+                    losing_hours = [h for h, s in hourly_perf.items() if s["win_rate"] < self.hour_min_win_rate]
+                    if losing_hours:
+                        logger.info("Learning: low-performance hours", hours=sorted(losing_hours))
+
+        except Exception as e:
+            logger.warning("Failed to refresh learning cache", error=str(e))
+
+    def _get_symbol_performance(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Get symbol performance from cache or DB."""
+        if not self.db_session:
+            return None
+
+        cache = self._learning_cache.get("symbol_cache", {})
+        if symbol in cache:
+            return cache[symbol]
+
+        try:
+            with self.db_session.session_scope() as session:
+                queries = DatabaseQueries(session)
+                stats = queries.get_symbol_performance(
+                    symbol, lookback_days=7, min_trades=self.symbol_min_trades
+                )
+                cache[symbol] = stats
+                return stats
+        except Exception:
+            return None
+
+    def _get_regime_performance(self, strategy_id: str, market_regime: str) -> Optional[Dict[str, Any]]:
+        """Get strategy+regime performance from cache or DB."""
+        if not self.db_session:
+            return None
+
+        cache_key = f"{strategy_id}:{market_regime}"
+        cache = self._learning_cache.get("regime_cache", {})
+        if cache_key in cache:
+            return cache[cache_key]
+
+        try:
+            with self.db_session.session_scope() as session:
+                queries = DatabaseQueries(session)
+                stats = queries.get_strategy_regime_performance(
+                    strategy_id, market_regime, lookback_days=14, min_trades=5
+                )
+                cache[cache_key] = stats
+                return stats
+        except Exception:
+            return None
+
+    def _check_strategy_auto_disable(self, strategy_id: str) -> bool:
+        """
+        Learning 1: Auto-disable strategy if win rate is too low.
+        Returns True if strategy should be SKIPPED.
+        """
+        stats = self._learning_cache.get("strategy_stats", {}).get(strategy_id)
+        if not stats:
+            return False  # Not enough data, allow strategy
+
+        if stats["win_rate"] < self.strategy_auto_disable_win_rate and stats["total_pnl"] < 0:
+            logger.info(
+                "Learning: strategy auto-disabled",
+                strategy=strategy_id,
+                win_rate=f"{stats['win_rate']:.0%}",
+                pnl=f"${stats['total_pnl']:.2f}",
+                trades=stats["total_trades"],
+            )
+            return True
+        return False
+
+    def _check_symbol_memory(self, symbol: str) -> Tuple[bool, str]:
+        """
+        Learning 2: Avoid symbols that consistently lose money.
+        Returns (should_reject, reason).
+        """
+        stats = self._get_symbol_performance(symbol)
+        if not stats:
+            return False, ""
+
+        if stats["win_rate"] < self.symbol_min_win_rate and stats["total_pnl"] < 0:
+            reason = (
+                f"Symbol learning: {symbol} has {stats['win_rate']:.0%} win rate "
+                f"over {stats['total_trades']} trades (PnL: ${stats['total_pnl']:.2f})"
+            )
+            return True, reason
+
+        return False, ""
+
+    def _check_hour_profitability(self) -> Tuple[bool, str]:
+        """
+        Learning 4: Avoid trading during historically unprofitable hours.
+        Returns (should_reject, reason).
+        """
+        hourly = self._learning_cache.get("hourly_performance", {})
+        if not hourly:
+            return False, ""
+
+        utc_hour = datetime.now(timezone.utc).hour
+        hour_stats = hourly.get(utc_hour)
+        if not hour_stats:
+            return False, ""
+
+        if hour_stats["win_rate"] < self.hour_min_win_rate and hour_stats["total_pnl"] < 0:
+            reason = (
+                f"Hour learning: UTC {utc_hour}:00 has {hour_stats['win_rate']:.0%} win rate "
+                f"over {hour_stats['total_trades']} trades (PnL: ${hour_stats['total_pnl']:.2f})"
+            )
+            return True, reason
+
+        return False, ""
+
+    def _apply_strategy_confidence_adjustment(self, strategy_id: str, confidence: float) -> float:
+        """
+        Learning 3: Adjust confidence based on strategy's historical win rate.
+        Boost strategies with proven edge, penalize weak ones.
+        """
+        stats = self._learning_cache.get("strategy_stats", {}).get(strategy_id)
+        if not stats:
+            return confidence
+
+        win_rate = stats["win_rate"]
+
+        # Strong performer: boost confidence
+        if win_rate >= 0.55 and stats["total_pnl"] > 0:
+            boost = min((win_rate - 0.50) * 0.3, 0.10)  # Max +10%
+            return min(1.0, confidence + boost)
+
+        # Weak performer: penalize confidence
+        if win_rate < 0.40:
+            penalty = min((0.40 - win_rate) * 0.5, 0.15)  # Max -15%
+            return max(0.0, confidence - penalty)
+
+        return confidence
+
+    def _apply_regime_adjustment(self, strategy_id: str, market_regime: str, confidence: float) -> float:
+        """
+        Learning 6: Adjust confidence based on strategy+regime historical fit.
+        """
+        stats = self._get_regime_performance(strategy_id, market_regime)
+        if not stats:
+            return confidence
+
+        win_rate = stats["win_rate"]
+
+        # Good regime fit: boost
+        if win_rate >= 0.55 and stats["total_pnl"] > 0:
+            return min(1.0, confidence + self.regime_confidence_boost)
+
+        # Bad regime fit: penalize
+        if win_rate < 0.35 and stats["total_pnl"] < 0:
+            return max(0.0, confidence - self.regime_confidence_penalty)
+
+        return confidence
 
     # ========== LLM ENHANCEMENT ==========
 

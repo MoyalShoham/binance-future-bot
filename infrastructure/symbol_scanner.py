@@ -10,6 +10,7 @@ Merges all sources, filters for Binance Futures availability, and ranks by score
 """
 
 import os
+import time
 from typing import List, Dict, Any, Set
 import requests
 import structlog
@@ -74,6 +75,15 @@ class SymbolScanner:
 
         # Cache of tradeable symbols (refreshed each scan)
         self._tradeable_symbols: Set[str] = set()
+
+        # Caches with TTL to avoid hammering external APIs
+        self._coingecko_cache: Dict[str, float] = {}
+        self._coingecko_cache_time: float = 0
+        self._cryptopanic_cache: Dict[str, float] = {}
+        self._cryptopanic_cache_time: float = 0
+        self._scan_cache: List[str] = []
+        self._scan_cache_time: float = 0
+        self._cache_ttl_seconds: float = 300  # 5 minutes
 
         logger.info(
             "SymbolScanner initialized",
@@ -147,6 +157,7 @@ class SymbolScanner:
     def _scan_coingecko_trending(self) -> Dict[str, float]:
         """
         Fetch trending coins from CoinGecko and map to Binance Futures symbols.
+        Results cached for 5 minutes to avoid rate-limiting.
 
         Returns:
             Dict of {symbol: score} for coins that exist on Binance Futures.
@@ -154,6 +165,10 @@ class SymbolScanner:
         scores = {}
         if not self.use_coingecko:
             return scores
+
+        # Return cached results if fresh
+        if self._coingecko_cache and (time.time() - self._coingecko_cache_time) < self._cache_ttl_seconds:
+            return self._coingecko_cache
 
         try:
             resp = requests.get(
@@ -192,6 +207,10 @@ class SymbolScanner:
                     found=list(scores.keys()),
                 )
 
+            # Cache results
+            self._coingecko_cache = scores
+            self._coingecko_cache_time = time.time()
+
         except Exception as e:
             logger.warning("CoinGecko trending fetch failed", error=str(e))
 
@@ -221,6 +240,10 @@ class SymbolScanner:
         scores = {}
         if not self.use_cryptopanic or not self.cryptopanic_api_key:
             return scores
+
+        # Return cached results if fresh
+        if self._cryptopanic_cache and (time.time() - self._cryptopanic_cache_time) < self._cache_ttl_seconds:
+            return self._cryptopanic_cache
 
         try:
             resp = requests.get(
@@ -267,6 +290,10 @@ class SymbolScanner:
                     found=list(scores.keys()),
                 )
 
+            # Cache results
+            self._cryptopanic_cache = scores
+            self._cryptopanic_cache_time = time.time()
+
         except Exception as e:
             logger.warning("CryptoPanic news fetch failed", error=str(e))
 
@@ -290,6 +317,11 @@ class SymbolScanner:
         """
         if not self.enabled:
             return list(self.always_include) if self.always_include else []
+
+        # Return full scan cache if fresh (avoids re-running entire pipeline every cycle)
+        if self._scan_cache and (time.time() - self._scan_cache_time) < self._cache_ttl_seconds:
+            logger.debug("Using cached scan results", symbols=len(self._scan_cache))
+            return list(self._scan_cache)
 
         try:
             # Refresh tradeable symbols list
@@ -352,6 +384,10 @@ class SymbolScanner:
                     "cryptopanic": len(cryptopanic_scores),
                 },
             )
+
+            # Cache full scan results
+            self._scan_cache = hot_symbols
+            self._scan_cache_time = time.time()
 
             return hot_symbols
 

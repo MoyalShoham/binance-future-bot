@@ -68,7 +68,8 @@
         "ema_crossover_scalp",
         "vwap_bounce_scalp",
         "orderbook_imbalance_scalp",
-        "momentum_breakout_scalp"
+        "momentum_breakout_scalp",
+        "rsi_pullback_scalp"
       ],
       "description": "Strategy that generated this decision (none/pre_filter for NO_TRADE)"
     },

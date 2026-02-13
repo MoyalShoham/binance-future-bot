@@ -383,3 +383,189 @@ class DatabaseQueries:
         """
         # TODO: Implement by comparing decision confidence with actual P&L
         return {}
+
+    # ========== LEARNING: Performance Feedback Queries ==========
+
+    def get_strategy_full_stats(
+        self,
+        strategy_id: str,
+        lookback_days: int = 7,
+        min_trades: int = 10
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get full performance stats for a strategy: win_rate, avg_win, avg_loss, total_pnl.
+        Used by Kelly criterion (full formula) and strategy auto-disable.
+
+        Returns:
+            Dict with stats, or None if insufficient data.
+        """
+        cutoff = datetime.utcnow() - timedelta(days=lookback_days)
+
+        results = (
+            self.session.query(PnLLedger.realized_pnl_usdt)
+            .join(Execution, Execution.id == PnLLedger.execution_id)
+            .join(TradingDecision, TradingDecision.id == Execution.decision_id)
+            .filter(
+                and_(
+                    TradingDecision.strategy_id == strategy_id,
+                    PnLLedger.is_closed == True,
+                    PnLLedger.exit_time >= cutoff,
+                )
+            )
+            .all()
+        )
+
+        total = len(results)
+        if total < min_trades:
+            return None
+
+        pnl_values = [r[0] for r in results if r[0] is not None]
+        wins = [p for p in pnl_values if p > 0]
+        losses = [p for p in pnl_values if p <= 0]
+
+        return {
+            "total_trades": total,
+            "win_rate": len(wins) / total if total > 0 else 0,
+            "avg_win": sum(wins) / len(wins) if wins else 0,
+            "avg_loss": abs(sum(losses) / len(losses)) if losses else 0,
+            "total_pnl": sum(pnl_values),
+            "wins": len(wins),
+            "losses": len(losses),
+        }
+
+    def get_symbol_performance(
+        self,
+        symbol: str,
+        lookback_days: int = 7,
+        min_trades: int = 5
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get performance stats for a specific symbol.
+        Used to avoid consistently losing symbols.
+
+        Returns:
+            Dict with stats, or None if insufficient data.
+        """
+        cutoff = datetime.utcnow() - timedelta(days=lookback_days)
+
+        results = (
+            self.session.query(PnLLedger.realized_pnl_usdt)
+            .filter(
+                and_(
+                    PnLLedger.symbol == symbol,
+                    PnLLedger.is_closed == True,
+                    PnLLedger.exit_time >= cutoff,
+                )
+            )
+            .all()
+        )
+
+        total = len(results)
+        if total < min_trades:
+            return None
+
+        pnl_values = [r[0] for r in results if r[0] is not None]
+        wins = [p for p in pnl_values if p > 0]
+
+        return {
+            "total_trades": total,
+            "win_rate": len(wins) / total if total > 0 else 0,
+            "total_pnl": sum(pnl_values),
+            "avg_pnl": sum(pnl_values) / total if total > 0 else 0,
+        }
+
+    def get_hourly_performance(
+        self,
+        lookback_days: int = 7,
+        min_trades_per_hour: int = 5
+    ) -> Dict[int, Dict[str, Any]]:
+        """
+        Get win rate breakdown by UTC hour of entry.
+        Used to avoid trading during historically losing hours.
+
+        Returns:
+            Dict of {hour: {"win_rate": float, "total_trades": int, "total_pnl": float}}
+        """
+        cutoff = datetime.utcnow() - timedelta(days=lookback_days)
+
+        results = (
+            self.session.query(
+                PnLLedger.entry_time,
+                PnLLedger.realized_pnl_usdt
+            )
+            .filter(
+                and_(
+                    PnLLedger.is_closed == True,
+                    PnLLedger.exit_time >= cutoff,
+                )
+            )
+            .all()
+        )
+
+        hourly: Dict[int, Dict[str, Any]] = {}
+        for entry_time, pnl in results:
+            if entry_time is None or pnl is None:
+                continue
+            hour = entry_time.hour
+            if hour not in hourly:
+                hourly[hour] = {"wins": 0, "total": 0, "total_pnl": 0.0}
+            hourly[hour]["total"] += 1
+            hourly[hour]["total_pnl"] += pnl
+            if pnl > 0:
+                hourly[hour]["wins"] += 1
+
+        result = {}
+        for hour, stats in hourly.items():
+            if stats["total"] >= min_trades_per_hour:
+                result[hour] = {
+                    "win_rate": stats["wins"] / stats["total"],
+                    "total_trades": stats["total"],
+                    "total_pnl": stats["total_pnl"],
+                }
+
+        return result
+
+    def get_strategy_regime_performance(
+        self,
+        strategy_id: str,
+        market_regime: str,
+        lookback_days: int = 14,
+        min_trades: int = 5
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get strategy performance for a specific market regime.
+        Used to adapt confidence based on regime-strategy fit.
+
+        Returns:
+            Dict with win_rate and total_pnl, or None if insufficient data.
+        """
+        cutoff = datetime.utcnow() - timedelta(days=lookback_days)
+
+        results = (
+            self.session.query(PnLLedger.realized_pnl_usdt)
+            .join(Execution, Execution.id == PnLLedger.execution_id)
+            .join(TradingDecision, TradingDecision.id == Execution.decision_id)
+            .join(ResearchSummary, ResearchSummary.id == TradingDecision.research_summary_id)
+            .filter(
+                and_(
+                    TradingDecision.strategy_id == strategy_id,
+                    ResearchSummary.market_regime == market_regime,
+                    PnLLedger.is_closed == True,
+                    PnLLedger.exit_time >= cutoff,
+                )
+            )
+            .all()
+        )
+
+        total = len(results)
+        if total < min_trades:
+            return None
+
+        pnl_values = [r[0] for r in results if r[0] is not None]
+        wins = [p for p in pnl_values if p > 0]
+
+        return {
+            "win_rate": len(wins) / total if total > 0 else 0,
+            "total_trades": total,
+            "total_pnl": sum(pnl_values),
+        }

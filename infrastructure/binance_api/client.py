@@ -467,6 +467,28 @@ class BinanceFuturesClient:
             self.logger.error("Failed to cancel algo order", symbol=symbol, algo_id=algo_id, error=str(e))
             raise
 
+    def get_open_algo_orders(self, symbol: str) -> List[Dict[str, Any]]:
+        """
+        Get all open orders for a symbol (includes STOP_MARKET, TAKE_PROFIT_MARKET).
+
+        Uses futures_get_open_orders (GET /fapi/v1/openOrders) which works for
+        both regular and conditional/algo orders.
+
+        Returns:
+            List of open orders with orderId, side, type, stopPrice, status.
+        """
+        try:
+            orders = self.client.futures_get_open_orders(symbol=symbol)
+            # Filter to only SL/TP type orders
+            return [
+                o for o in orders
+                if o.get("type") in ("STOP_MARKET", "TAKE_PROFIT_MARKET")
+                and o.get("status") in ("NEW", "PARTIALLY_FILLED")
+            ]
+        except BinanceAPIException as e:
+            self.logger.warning("Failed to get open orders", symbol=symbol, error=str(e))
+            return []
+
     def cancel_all_algo_orders(self, symbol: str) -> Dict[str, Any]:
         """
         Cancel all open algo orders for a symbol.

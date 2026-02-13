@@ -53,7 +53,26 @@
       "Bash(git merge:*)",
       "Bash(git pull:*)",
       "Bash(git stash:*)",
-      "Bash(\".\\\\.conda\\\\python.exe\" -c \"import py_compile; py_compile.compile\\(''infrastructure/trailing_stop.py'', doraise=True\\); print\\(''OK''\\)\")"
+      "Bash(git push:*)",
+      "Bash(gh pr create:*)",
+      "Bash(where:*)",
+      "Bash(git remote get-url:*)",
+      "Bash(\".\\\\.conda\\\\python.exe\" -c \"import py_compile; files=[''agents/implementations/trading_decision.py'',''agents/implementations/risk_manager.py'',''infrastructure/trailing_stop.py'',''infrastructure/binance_api/client.py'']; [print\\(''OK:'', f\\) for f in files if py_compile.compile\\(f, doraise=True\\) or True]\")",
+      "Bash(\".\\\\.conda\\\\python.exe\" -c:*)",
+      "Bash(\".\\\\.conda\\\\python.exe\" -c \"import py_compile; py_compile.compile\\(''infrastructure/trailing_stop.py'', doraise=True\\); print\\(''OK''\\)\")",
+      "Bash(powershell.exe -Command \"where.exe gh 2>$null; if \\(-not $? { ''not found'' }\")",
+      "Bash(powershell.exe -Command:*)",
+      "Bash(git fetch:*)",
+      "Bash(git rebase:*)",
+      "Bash(\".\\\\.conda\\\\python.exe\" -m py_compile infrastructure/trailing_stop.py)",
+      "Bash(\".\\\\.conda\\\\python.exe\" main.py --mode live --continuous --interval 10)",
+      "Bash(\".\\\\.conda\\\\python.exe\" -m py_compile infrastructure/symbol_scanner.py)",
+      "Bash(\".\\\\.conda\\\\python.exe\" -m py_compile:*)",
+      "Bash(\".\\\\.conda\\\\python.exe\" -m py_compile main.py)",
+      "Bash(\".\\\\.conda\\\\python.exe\" main.py --mode live --symbol BTCUSDT)",
+      "Bash(.\\\\.conda\\\\python.exe:*)",
+      "Bash(dir:*)",
+      "Bash(findstr:*)"
     ]
   }
 }

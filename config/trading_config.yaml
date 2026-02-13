@@ -29,10 +29,10 @@ trading:
 # Hot Symbol Scanner - multi-source symbol discovery each round
 symbol_scanner:
   enabled: true
-  min_volume_usdt: 100000000      # Min 24h volume $100M (liquidity filter)
-  top_n: 10                       # Pick top 10 movers
+  min_volume_usdt: 200000000      # Min 24h volume $200M (stricter liquidity filter, was $100M)
+  top_n: 8                        # Pick top 8 movers (fewer, higher quality)
   min_price_change_pct: 1.5       # Min 1.5% 24h change (momentum filter)
-  max_price_change_pct: 30.0      # Max 30% - skip delistings/anomalous pumps
+  max_price_change_pct: 15.0      # Max 15% - skip pump-and-dump memecoins (was 30%)
   always_include: ["BTCUSDT", "ETHUSDT", "SOLUSDT"]  # Blue-chips: tight spreads, low funding, deep books
 
   # External sources (merged with Binance movers, multi-source symbols get boosted)
@@ -76,7 +76,7 @@ risk:
   sl_atr_multiplier: 1.0       # Tighter SL (was 1.5)
   tp_atr_multiplier: 2.5       # Wider TP (was 2.0)
   min_rr_ratio: 2.0            # Enforce minimum R:R
-  min_sl_distance_pct: 0.003   # 0.3% floor to prevent too-tight stops
+  min_sl_distance_pct: 0.005   # 0.5% floor to prevent too-tight stops
 
   # Position sizing method
   position_sizing:
@@ -228,10 +228,11 @@ reporting:
 # Strategies
 strategies:
   enabled:
-    - "ema_crossover_scalp"
-    - "vwap_bounce_scalp"
-    - "orderbook_imbalance_scalp"
-    - "momentum_breakout_scalp"
+    - "ema_crossover_scalp"    # Re-enabled: now has trend strength filter (ATR-normalized EMA spread)
+    - "vwap_bounce_scalp"      # Widened: 0.5% zone + volume confirmation + graduated confidence
+    - "rsi_pullback_scalp"     # NEW: buy oversold dips in uptrends, sell overbought in downtrends
+    # orderbook_imbalance_scalp: DISABLED — noise-based signals, no edge
+    # momentum_breakout_scalp: DISABLED — needs stronger trend regime filter
 
   # Strategy-specific parameters
   ema_crossover_scalp:
@@ -255,6 +256,30 @@ strategies:
     volume_multiplier: 1.5  # 1.5x average volume required
     expected_holding_time_seconds: 240
 
+  rsi_pullback_scalp:
+    timeframe: "5m"
+    rsi_oversold: 40       # Buy zone ceiling (entry when RSI < this in uptrend)
+    rsi_overbought: 60     # Sell zone floor (entry when RSI > this in downtrend)
+    expected_holding_time_seconds: 180
+
+# Learning from Past Trades
+# The bot automatically learns from its own trade history to improve decisions.
+learning:
+  # Strategy auto-disable: penalize strategy if win rate drops below threshold
+  strategy_auto_disable_win_rate: 0.25   # 25% — penalize strategy below this
+  strategy_auto_disable_min_trades: 30   # Need 30+ trades before learning kicks in
+
+  # Symbol memory: penalize symbols with consistently negative P&L
+  symbol_min_win_rate: 0.20              # 20% — penalize symbol below this
+  symbol_min_trades: 20                  # Need 20+ trades before learning kicks in
+
+  # Time-of-day: soft penalty during historically losing hours
+  hour_min_win_rate: 0.30                # 30% — soft penalty for hours below this
+
+  # Regime-based confidence: boost/penalize based on strategy+regime history
+  regime_confidence_boost: 0.08          # +8% confidence for proven regime fit
+  regime_confidence_penalty: 0.10        # -10% confidence for poor regime fit
+
 # Trailing Stop Configuration (Ratcheting TP/SL)
 trailing_stop:
   enabled: true
@@ -277,9 +302,9 @@ trailing_stop:
   # Dynamic SL adjustment (move SL to breakeven, then trail)
   dynamic_sl:
     enabled: true
-    breakeven_move_pct: 0.004    # Move SL to breakeven at 0.4% profit
-    trail_activation_pct: 0.008  # Start trailing at 0.8% profit
-    trail_step_pct: 0.003        # SL trails 0.3% behind price
+    breakeven_move_pct: 0.006    # Move SL to breakeven at 0.6% profit (> SL floor)
+    trail_activation_pct: 0.012  # Start trailing at 1.2% profit
+    trail_step_pct: 0.004        # SL trails 0.4% behind price
     min_move_pct: 0.001          # Only move SL if change > 0.1%
 
   # Logging

@@ -762,35 +762,51 @@ class RiskManagerAgent(BaseAgent):
         research_summary: Optional[Dict[str, Any]],
         account_status: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Kelly Criterion position sizing with safety fraction and real win rate data."""
+        """Kelly Criterion position sizing with full formula: real win_rate AND avg_win/avg_loss."""
 
         # Extract risk metrics from decision (conservative defaults)
         risk_metrics = trading_decision.get("risk_metrics", {})
         rr_ratio = risk_metrics.get("risk_reward_ratio", 2.0)
 
-        # Try to get REAL win rate from database for this strategy
+        # Try to get REAL stats from database for this strategy
         strategy_id = trading_decision.get("strategy_id", "")
         win_prob = None
+        avg_win = None
+        avg_loss = None
         try:
             with self.db_session.session_scope() as session:
                 self.queries.session = session
-                win_prob = self.queries.get_strategy_win_rate(
-                    strategy_id, lookback_days=7, min_trades=30
+                stats = self.queries.get_strategy_full_stats(
+                    strategy_id, lookback_days=7, min_trades=10
                 )
+                if stats:
+                    win_prob = stats["win_rate"]
+                    avg_win = stats["avg_win"]
+                    avg_loss = stats["avg_loss"]
+                    # Use real R:R from actual trades instead of decision-level estimate
+                    if avg_loss > 0:
+                        rr_ratio = avg_win / avg_loss
         except Exception as e:
-            logger.warning("Failed to fetch strategy win rate from DB", error=str(e))
+            logger.warning("Failed to fetch strategy stats from DB", error=str(e))
 
-        # Fall back to conservative 50% if not enough data
+        # Fall back to conservative defaults if not enough data
         if win_prob is None:
             win_prob = 0.50
             logger.debug("Using conservative 50% win rate (insufficient data)", strategy_id=strategy_id)
         else:
-            logger.info("Using real win rate from DB", strategy_id=strategy_id, win_rate=f"{win_prob:.1%}")
+            logger.info(
+                "Using real strategy stats from DB",
+                strategy_id=strategy_id,
+                win_rate=f"{win_prob:.1%}",
+                avg_win=f"${avg_win:.3f}" if avg_win else "N/A",
+                avg_loss=f"${avg_loss:.3f}" if avg_loss else "N/A",
+                real_rr=f"{rr_ratio:.2f}",
+            )
 
-        # Kelly formula: (p * rr - (1 - p)) / rr
-        # where p = win probability, rr = risk/reward ratio
+        # Full Kelly formula: f* = (p * b - q) / b
+        # where p = win probability, q = 1-p, b = avg_win/avg_loss (odds)
         if rr_ratio <= 0:
-            rr_ratio = 2.0  # Fallback to safe default
+            rr_ratio = 2.0
         kelly_pct = (win_prob * rr_ratio - (1 - win_prob)) / rr_ratio
         kelly_pct = max(0, kelly_pct)  # Never negative
 

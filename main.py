@@ -153,7 +153,7 @@ def initialize_agents(config: dict, binance_client: BinanceFuturesClient, db_ses
     """
     agents = {
         "research_coordinator": ResearchCoordinatorAgent("research-coordinator", config, binance_client, model_router=model_router),
-        "trading_decision": TradingDecisionAgent("trading-decision", config, model_router=model_router, binance_client=binance_client),
+        "trading_decision": TradingDecisionAgent("trading-decision", config, model_router=model_router, binance_client=binance_client, db_session=db_session),
         "risk_manager": RiskManagerAgent("risk-manager", config, binance_client, db_session),  # NO model_router - stays rule-based
         "execution_agent": ExecutionAgent("execution-agent", config, binance_client, db_session, model_router=model_router),
         "storage_reporter": StorageReporterAgent("storage-reporter", config, db_session, model_router=model_router, trades_db=trades_db),
@@ -346,7 +346,18 @@ def main():
 
             import time
             while True:
+                # Get symbols with open Binance positions (skip these for new trades)
+                open_pos_symbols = set()
+                try:
+                    open_pos_symbols = {p["symbol"] for p in binance_client.get_positions()}
+                except Exception:
+                    pass
+
                 for symbol in symbols:
+                    # Skip symbols with open positions — trailing stop handles them
+                    if symbol in open_pos_symbols:
+                        logger.debug("Skipping symbol with open position", symbol=symbol)
+                        continue
                     run_single_cycle(coordinator, symbol, execution_mode)
 
                 # Re-scan for hot symbols each round
@@ -354,14 +365,11 @@ def main():
                     new_symbols = symbol_scanner.scan()
                     if new_symbols:
                         symbols = new_symbols
-                    # Always keep symbols with open positions in the list
-                    try:
-                        open_pos_symbols = {p["symbol"] for p in binance_client.get_positions()}
-                        for s in open_pos_symbols:
-                            if s not in symbols:
-                                symbols.append(s)
-                    except Exception:
-                        pass
+                    # Always keep symbols with open positions in the watch list
+                    # (so trailing stop monitor tracks them, even if we skip new-trade cycles)
+                    for s in open_pos_symbols:
+                        if s not in symbols:
+                            symbols.append(s)
 
                 time.sleep(args.interval)
         else:

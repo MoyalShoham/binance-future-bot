@@ -105,6 +105,7 @@ class TrailingStopMonitor:
         Check all open positions.
         For positions with SL/TP order IDs: sync with Binance.
         For legacy positions: apply ratcheting TP/SL logic.
+        Also reconciles orphaned Binance positions (no DB record / no SL/TP).
         Called every 5 seconds from EmergencyController loop.
         """
         if not self.enabled:
@@ -115,13 +116,6 @@ class TrailingStopMonitor:
                 queries = DatabaseQueries(session)
                 open_positions = queries.get_open_positions()
 
-                if not open_positions:
-                    self.position_levels.clear()
-                    self.sl_states.clear()
-                    return
-
-                logger.debug("Position sync monitoring", open_positions=len(open_positions))
-
                 # Fetch Binance positions once for all checks
                 binance_positions = {}
                 try:
@@ -131,7 +125,20 @@ class TrailingStopMonitor:
                             binance_positions[bp["symbol"]] = bp
                 except Exception as e:
                     logger.error("Failed to fetch Binance positions", error=str(e))
-                    # Continue with empty — will skip sync logic but still do time exits
+
+                # Reconcile: find Binance positions without DB records or without SL/TP
+                if binance_positions and self.execution_mode != "paper":
+                    db_symbols = {p.symbol for p in open_positions} if open_positions else set()
+                    self._reconcile_orphaned_positions(binance_positions, db_symbols, open_positions or [], session)
+                    # Re-fetch after reconciliation may have added records
+                    open_positions = queries.get_open_positions()
+
+                if not open_positions:
+                    self.position_levels.clear()
+                    self.sl_states.clear()
+                    return
+
+                logger.debug("Position sync monitoring", open_positions=len(open_positions))
 
                 for position in open_positions:
                     try:
@@ -240,7 +247,7 @@ class TrailingStopMonitor:
 
             # FALLBACK: Check algo order statuses if trades API failed
             if exit_price <= 0:
-                if position.sl_order_id:
+                if position.sl_order_id and position.sl_order_id.isdigit():
                     try:
                         sl_status = self.binance_client.get_algo_order_status(
                             position.symbol, int(position.sl_order_id)
@@ -252,7 +259,7 @@ class TrailingStopMonitor:
                     except Exception as e:
                         logger.warning("Failed to check SL algo order status", error=str(e))
 
-                if position.tp_order_id:
+                if position.tp_order_id and position.tp_order_id.isdigit():
                     try:
                         tp_status = self.binance_client.get_algo_order_status(
                             position.symbol, int(position.tp_order_id)
@@ -307,9 +314,29 @@ class TrailingStopMonitor:
                 position_id=pos_id,
                 symbol=position.symbol,
                 side=position.side,
+                db_qty=position.quantity,
+                rounded_qty=quantity,
             )
 
             if self.execution_mode != "paper":
+                # If quantity rounds to 0, check if position is already gone on Binance
+                if quantity <= 0:
+                    binance_qty = self._get_binance_position_qty(position.symbol)
+                    if binance_qty > 0:
+                        # Position exists on Binance with different qty — use Binance qty
+                        quantity = self._round_quantity(position.symbol, binance_qty)
+                    if quantity <= 0:
+                        # Position already closed on Binance (or qty still rounds to 0)
+                        logger.info(
+                            "Position already closed on Binance, finalizing in DB",
+                            position_id=pos_id,
+                            symbol=position.symbol,
+                        )
+                        # Remove from closing_in_progress so _handle_sl_tp_triggered can proceed
+                        self.closing_in_progress.discard(pos_id)
+                        self._handle_sl_tp_triggered(position, session)
+                        return
+
                 # Cancel SL/TP orders first (both algo and regular)
                 try:
                     self.binance_client.cancel_all_algo_orders(position.symbol)
@@ -330,12 +357,50 @@ class TrailingStopMonitor:
                         reduce_only=True,
                     )
                 except Exception as e:
-                    logger.error("Failed to send market close for time exit", error=str(e), exc_info=True)
+                    error_str = str(e)
+                    if "-2022" in error_str:
+                        logger.warning(
+                            "ReduceOnly rejected on time exit — position gone or side mismatch",
+                            position_id=pos_id,
+                            symbol=position.symbol,
+                        )
+                        exit_price = self.binance_client.get_ticker_price(position.symbol)
+                        self._finalize_close(position, exit_price, "STALE_CLOSED", session)
+                        return
+                    logger.error("Failed to send market close for time exit", error=error_str, exc_info=True)
                     self.closing_in_progress.discard(pos_id)
                     return
 
+                # Fetch actual fill data from Binance for accurate PnL
+                actual_pnl = None
+                actual_fees = None
+                exit_price = None
+                try:
+                    recent_trades = self.binance_client.get_recent_trades(position.symbol, limit=10)
+                    closing_fills = [
+                        t for t in recent_trades
+                        if t["side"] == close_side and t["realized_pnl"] != 0
+                    ]
+                    if closing_fills:
+                        latest_fill = closing_fills[-1]
+                        exit_price = latest_fill["price"]
+                        actual_pnl = sum(t["realized_pnl"] for t in closing_fills[-5:])
+                        actual_fees = sum(t["commission"] for t in closing_fills[-5:])
+                except Exception as e:
+                    logger.warning("Failed to get fill data for time exit", error=str(e))
+
+                if exit_price is None:
+                    exit_price = self.binance_client.get_ticker_price(position.symbol)
+
+                self._finalize_close(position, exit_price, "TIME_EXIT", session,
+                                     actual_pnl=actual_pnl, actual_fees=actual_fees,
+                                     close_quantity=quantity)
+                return
+
+            # Paper mode: estimate from ticker
             current_price = self.binance_client.get_ticker_price(position.symbol)
-            self._finalize_close(position, current_price, "TIME_EXIT", session)
+            self._finalize_close(position, current_price, "TIME_EXIT", session,
+                                 close_quantity=position.quantity)
 
         except Exception as e:
             logger.error("Failed to handle time exit", position_id=pos_id, error=str(e), exc_info=True)
@@ -437,10 +502,14 @@ class TrailingStopMonitor:
         # Round to symbol's price precision (e.g. BTCUSDT=1 decimal)
         new_sl_price = self._round_price(symbol, new_sl_price)
 
-        # Cancel old SL
+        # Cancel old SL (cancel all for symbol since ID may be "EXISTING" placeholder)
         if position.sl_order_id:
             try:
-                self.binance_client.cancel_algo_order(symbol, int(position.sl_order_id))
+                if position.sl_order_id.isdigit():
+                    self.binance_client.cancel_algo_order(symbol, int(position.sl_order_id))
+                else:
+                    # "EXISTING" or unknown ID — cancel all algo orders for symbol
+                    self.binance_client.cancel_all_algo_orders(symbol)
                 logger.info("Cancelled old SL order", symbol=symbol, old_sl_id=position.sl_order_id)
             except Exception as e:
                 logger.warning("Failed to cancel old SL order", symbol=symbol, error=str(e))
@@ -617,21 +686,29 @@ class TrailingStopMonitor:
             return None
 
     def _finalize_close(self, position: PnLLedger, exit_price: float, reason: str, session,
-                        actual_pnl: float = None, actual_fees: float = None):
-        """Update PnLLedger and trades DB after position close."""
+                        actual_pnl: float = None, actual_fees: float = None,
+                        close_quantity: float = None):
+        """Update PnLLedger and trades DB after position close.
+
+        Args:
+            close_quantity: Actual quantity closed. Used for PnL estimation when
+                           position.quantity in DB is 0 or wrong.
+        """
         if actual_pnl is not None and actual_fees is not None:
             # Use actual Binance data (most accurate)
             realized_pnl = actual_pnl - actual_fees
             total_fees = actual_fees
         else:
             # Estimate from entry/exit prices
+            # Use close_quantity if provided (covers DB qty=0 case)
+            qty = close_quantity if close_quantity and close_quantity > 0 else position.quantity
             is_long = position.side == "LONG"
             if is_long:
-                raw_pnl = (exit_price - position.entry_price) * position.quantity * position.leverage
+                raw_pnl = (exit_price - position.entry_price) * qty * position.leverage
             else:
-                raw_pnl = (position.entry_price - exit_price) * position.quantity * position.leverage
+                raw_pnl = (position.entry_price - exit_price) * qty * position.leverage
 
-            notional = position.entry_price * position.quantity
+            notional = position.entry_price * qty
             fee_rate = self.taker_fee_bps / 10000
             total_fees = notional * fee_rate * 2
             realized_pnl = raw_pnl - total_fees
@@ -696,6 +773,21 @@ class TrailingStopMonitor:
             close_side = "SELL" if is_long else "BUY"
             quantity = self._round_quantity(position.symbol, position.quantity)
 
+            # Guard: if quantity rounds to 0, check Binance position
+            if quantity <= 0 and self.execution_mode != "paper":
+                binance_qty = self._get_binance_position_qty(position.symbol)
+                if binance_qty > 0:
+                    quantity = self._round_quantity(position.symbol, binance_qty)
+                if quantity <= 0:
+                    # Position already gone on Binance — finalize in DB
+                    logger.info(
+                        "Position already closed on Binance (qty=0), finalizing",
+                        position_id=pos_id,
+                        symbol=position.symbol,
+                    )
+                    self._finalize_close(position, current_price, reason, session)
+                    return
+
             logger.info(
                 "Closing legacy position",
                 position_id=pos_id,
@@ -718,16 +810,28 @@ class TrailingStopMonitor:
                         reduce_only=True,
                     )
                 except Exception as e:
+                    error_str = str(e)
+                    # -2022: ReduceOnly rejected = position doesn't exist or side mismatch
+                    if "-2022" in error_str:
+                        logger.warning(
+                            "ReduceOnly rejected — position gone or side mismatch, marking closed in DB",
+                            position_id=pos_id,
+                            symbol=position.symbol,
+                            side=position.side,
+                        )
+                        self._finalize_close(position, current_price, "STALE_CLOSED", session)
+                        return
                     logger.error(
                         "Failed to close position on Binance",
                         position_id=pos_id,
-                        error=str(e),
+                        error=error_str,
                         exc_info=True,
                     )
                     self.closing_in_progress.discard(pos_id)
                     return
 
-            self._finalize_close(position, current_price, reason, session)
+            self._finalize_close(position, current_price, reason, session,
+                                 close_quantity=quantity)
 
         except Exception as e:
             logger.error(
@@ -739,6 +843,236 @@ class TrailingStopMonitor:
             )
         finally:
             self.closing_in_progress.discard(pos_id)
+
+    # ========== ORPHAN RECONCILIATION ==========
+
+    def _reconcile_orphaned_positions(self, binance_positions: Dict[str, Any],
+                                       db_symbols: set, db_positions: List[PnLLedger], session):
+        """
+        Reconcile Binance positions with DB records:
+        1. Close stale DB records (side mismatch or symbol no longer on Binance)
+        2. Create PnLLedger entries for orphaned Binance positions (no DB record)
+        3. Place SL/TP protective orders for any position missing them
+        """
+        risk_config = self.config.get("risk", {})
+        sl_distance_pct = risk_config.get("min_sl_distance_pct", 0.003)
+        fallback_sl_pct = self.hard_stop_fallback_pct  # 2%
+        min_rr = risk_config.get("min_rr_ratio", 2.0)
+
+        # --- Step 0: Close stale DB records (no Binance position or side mismatch) ---
+        for db_pos in db_positions:
+            if db_pos.is_closed:
+                continue
+            bp = binance_positions.get(db_pos.symbol)
+            if bp is None or bp.get("position_amount", 0) == 0:
+                # Position gone from Binance — likely SL/TP triggered
+                logger.info(
+                    "Position gone from Binance, checking fill data",
+                    position_id=db_pos.id,
+                    symbol=db_pos.symbol,
+                    side=db_pos.side,
+                )
+                # Use proper SL/TP handler to get actual fill data from account trades
+                self._handle_sl_tp_triggered(db_pos, session)
+                continue
+
+            # Side mismatch: DB says LONG but Binance has SHORT (or vice versa)
+            binance_side = "LONG" if bp.get("position_amount", 0) > 0 else "SHORT"
+            if db_pos.side != binance_side:
+                logger.info(
+                    "Closing stale DB record (side mismatch)",
+                    position_id=db_pos.id,
+                    symbol=db_pos.symbol,
+                    db_side=db_pos.side,
+                    binance_side=binance_side,
+                )
+                try:
+                    exit_price = self.binance_client.get_ticker_price(db_pos.symbol)
+                except Exception:
+                    exit_price = db_pos.entry_price
+                self._finalize_close(db_pos, exit_price, "STALE_CLOSED", session)
+
+        # Refresh db_symbols after closing stale records
+        db_symbols = {p.symbol for p in db_positions if not p.is_closed}
+
+        for symbol, bp in binance_positions.items():
+            pos_amount = bp.get("position_amount", 0)
+            if pos_amount == 0:
+                continue
+
+            is_long = pos_amount > 0
+            side = "LONG" if is_long else "SHORT"
+            entry_price = bp.get("entry_price", 0)
+            quantity = abs(pos_amount)
+            leverage = bp.get("leverage", 3)
+
+            if entry_price <= 0:
+                continue
+
+            # --- Step 1: Create DB record if missing ---
+            db_pos = None
+            if symbol not in db_symbols:
+                # Re-check DB to avoid race condition with execution agent
+                existing = session.query(PnLLedger).filter(
+                    PnLLedger.symbol == symbol,
+                    PnLLedger.is_closed == False,
+                ).first()
+                if existing:
+                    db_pos = existing
+                    logger.debug("Found recently created DB record, skipping orphan creation",
+                                 symbol=symbol, position_id=existing.id)
+                else:
+                    db_pos = PnLLedger(
+                        symbol=symbol,
+                        side=side,
+                        entry_price=entry_price,
+                        quantity=quantity,
+                        leverage=leverage,
+                        entry_time=datetime.utcnow(),
+                        is_closed=False,
+                    )
+                    session.add(db_pos)
+                    session.flush()  # Get the ID
+
+                    logger.info(
+                        "Created DB record for orphaned Binance position",
+                        position_id=db_pos.id,
+                        symbol=symbol,
+                        side=side,
+                        entry_price=entry_price,
+                        quantity=quantity,
+                        leverage=leverage,
+                    )
+            else:
+                # Find existing DB position for this symbol
+                for p in db_positions:
+                    if p.symbol == symbol and not p.is_closed:
+                        db_pos = p
+                        break
+
+            if not db_pos:
+                continue
+
+            # --- Step 2: Check and place SL/TP if missing ---
+            has_sl = bool(db_pos.sl_order_id)
+            has_tp = bool(db_pos.tp_order_id)
+
+            # If already has both, skip
+            if has_sl and has_tp:
+                continue
+
+            # Verify against Binance algo orders
+            try:
+                algo_orders = self.binance_client.get_open_algo_orders(symbol)
+            except Exception as e:
+                logger.warning("Failed to check algo orders for reconciliation", symbol=symbol, error=str(e))
+                continue
+
+            existing_sl = None
+            existing_tp = None
+            for order in algo_orders:
+                order_type = order.get("type", "")
+                if order_type == "STOP_MARKET":
+                    existing_sl = order
+                elif order_type == "TAKE_PROFIT_MARKET":
+                    existing_tp = order
+
+            # Calculate SL/TP prices using percentage-based (no ATR for orphans)
+            sl_distance = max(fallback_sl_pct, sl_distance_pct)
+            tp_distance = sl_distance * min_rr  # R:R enforced
+
+            if is_long:
+                sl_price = entry_price * (1 - sl_distance)
+                tp_price = entry_price * (1 + tp_distance)
+                close_side = "SELL"
+            else:
+                sl_price = entry_price * (1 + sl_distance)
+                tp_price = entry_price * (1 - tp_distance)
+                close_side = "BUY"
+
+            sl_price = self._round_price(symbol, sl_price)
+            tp_price = self._round_price(symbol, tp_price)
+
+            # Place SL if missing
+            if not has_sl and not existing_sl:
+                try:
+                    sl_result = self.binance_client.create_algo_order(
+                        symbol=symbol,
+                        side=close_side,
+                        order_type="STOP_MARKET",
+                        trigger_price=sl_price,
+                        close_position=True,
+                    )
+                    sl_id = str(sl_result.get("algoId", ""))
+                    db_pos.sl_order_id = sl_id
+                    session.flush()
+                    logger.info(
+                        "Placed protective SL for position",
+                        symbol=symbol,
+                        side=side,
+                        sl_price=sl_price,
+                        sl_id=sl_id,
+                    )
+                except Exception as e:
+                    if "-4130" in str(e):
+                        # SL already exists on Binance — mark as protected
+                        db_pos.sl_order_id = "EXISTING"
+                        session.flush()
+                        logger.info("SL already exists on Binance", symbol=symbol)
+                    else:
+                        logger.error("Failed to place protective SL", symbol=symbol, error=str(e))
+            elif existing_sl and not has_sl:
+                # SL exists on Binance but not in DB — store the ID
+                db_pos.sl_order_id = str(existing_sl.get("orderId", existing_sl.get("algoId", "EXISTING")))
+                session.flush()
+                logger.info("Linked existing Binance SL to DB", symbol=symbol,
+                            sl_id=db_pos.sl_order_id)
+
+            # Place TP if missing
+            if not has_tp and not existing_tp:
+                try:
+                    tp_result = self.binance_client.create_algo_order(
+                        symbol=symbol,
+                        side=close_side,
+                        order_type="TAKE_PROFIT_MARKET",
+                        trigger_price=tp_price,
+                        close_position=True,
+                    )
+                    tp_id = str(tp_result.get("algoId", ""))
+                    db_pos.tp_order_id = tp_id
+                    session.flush()
+                    logger.info(
+                        "Placed protective TP for position",
+                        symbol=symbol,
+                        side=side,
+                        tp_price=tp_price,
+                        tp_id=tp_id,
+                    )
+                except Exception as e:
+                    if "-4130" in str(e):
+                        # TP already exists on Binance — mark as protected
+                        db_pos.tp_order_id = "EXISTING"
+                        session.flush()
+                        logger.info("TP already exists on Binance", symbol=symbol)
+                    else:
+                        logger.error("Failed to place protective TP", symbol=symbol, error=str(e))
+            elif existing_tp and not has_tp:
+                # TP exists on Binance but not in DB — store the ID
+                db_pos.tp_order_id = str(existing_tp.get("orderId", existing_tp.get("algoId", "EXISTING")))
+                session.flush()
+                logger.info("Linked existing Binance TP to DB", symbol=symbol,
+                            tp_id=db_pos.tp_order_id)
+
+    def _get_binance_position_qty(self, symbol: str) -> float:
+        """Get actual position quantity from Binance. Returns 0 if no position or on error."""
+        try:
+            positions = self.binance_client.get_positions()
+            for p in positions:
+                if p["symbol"] == symbol:
+                    return abs(p.get("position_amount", 0))
+        except Exception as e:
+            logger.warning("Failed to get Binance position qty", symbol=symbol, error=str(e))
+        return 0.0
 
     def _round_quantity(self, symbol: str, quantity: float) -> float:
         """Round quantity to symbol's step size."""
