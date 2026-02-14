@@ -72,7 +72,18 @@
       "Bash(\".\\\\.conda\\\\python.exe\" main.py --mode live --symbol BTCUSDT)",
       "Bash(.\\\\.conda\\\\python.exe:*)",
       "Bash(dir:*)",
-      "Bash(findstr:*)"
+      "Bash(findstr:*)",
+      "Bash(\".conda\\\\python.exe\" -c \"from binance import ThreadedWebsocketManager; print\\(''ThreadedWebsocketManager available''\\)\")",
+      "Bash(\".conda\\\\python.exe\":*)",
+      "Bash(\".conda\\\\python.exe\" -c:*)",
+      "Bash(\".conda\\\\python.exe\" main.py --mode live --symbol all --continuous --interval 30)",
+      "Bash(\".conda\\\\python.exe\" -c \"\nfrom binance import ThreadedWebsocketManager\n# List all futures-related socket methods\nmethods = [m for m in dir\\(ThreadedWebsocketManager\\) if ''futures'' in m.lower\\(\\) or ''ticker'' in m.lower\\(\\)]\nfor m in sorted\\(methods\\):\n    print\\(m\\)\n\")",
+      "Bash(timeout:*)",
+      "Bash(..condapython.exe -c \"import py_compile; py_compile.compile\\(''infrastructure/trailing_stop.py'', doraise=True\\); print\\(''trailing_stop.py OK''\\)\")",
+      "Bash(..condapython.exe -c \"import py_compile; py_compile.compile\\(''agents/implementations/trading_decision.py'', doraise=True\\); print\\(''trading_decision.py OK''\\)\")",
+      "Bash(..condapython.exe -c \"import py_compile; py_compile.compile\\(''infrastructure/binance_api/indicators.py'', doraise=True\\); print\\(''indicators.py OK''\\)\")",
+      "Bash(C:\\\\Users\\\\User\\\\Desktop\\\\binance-future-bot\\\\.conda\\\\python.exe:*)",
+      "Bash(main.py \")"
     ]
   }
 }

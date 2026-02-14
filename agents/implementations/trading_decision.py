@@ -98,7 +98,7 @@ class TradingDecisionAgent(BaseAgent):
         self.fee_buffer_multiplier = fee_filter_config.get("fee_buffer_multiplier", 1.5)
 
         # Confidence threshold for trades
-        self.min_confidence = 0.75  # Minimum 75% confidence to trade (was 70%)
+        self.min_confidence = 0.70  # Minimum 70% confidence to trade
 
         # Risk config filters
         risk_config = config.get("risk", {})
@@ -459,7 +459,7 @@ class TradingDecisionAgent(BaseAgent):
         # Filters noise crossovers — only trade when EMAs are meaningfully apart
         ema_spread = abs(ema_9 - ema_21)
         trend_strength = ema_spread / atr if atr > 0 else 0
-        if trend_strength < 0.3:  # EMAs too close = noise, not trend
+        if trend_strength < 0.15:  # EMAs too close = noise, not trend
             return {"signal": "neutral", "confidence": 0.5}
 
         # Bullish crossover: was below/equal, now above
@@ -467,21 +467,24 @@ class TradingDecisionAgent(BaseAgent):
         # Bearish crossover: was above/equal, now below
         bearish_cross = prev_ema_9 >= prev_ema_21 and ema_9 < ema_21
 
-        # REQUIRE HTF trend alignment (not just "not against")
-        if bullish_cross and price > ema_50 and htf_trend == "bullish":
+        # HTF trend: require not against (bullish or neutral for longs)
+        if bullish_cross and price > ema_50 and htf_trend != "bearish":
             if imbalance > 0.05 and 35 < rsi < 70:
                 signal = "long"
-                confidence = 0.76 + (abs(imbalance) * 0.15)
-                # Bonus for strong trend
-                if trend_strength > 0.6:
-                    confidence += 0.05
+                confidence = 0.74 + (abs(imbalance) * 0.15)
+                if htf_trend == "bullish":
+                    confidence += 0.05  # Bonus for full alignment
+                if trend_strength > 0.4:
+                    confidence += 0.04
 
-        elif bearish_cross and price < ema_50 and htf_trend == "bearish":
+        elif bearish_cross and price < ema_50 and htf_trend != "bullish":
             if imbalance < -0.05 and 30 < rsi < 65:
                 signal = "short"
-                confidence = 0.76 + (abs(imbalance) * 0.15)
-                if trend_strength > 0.6:
+                confidence = 0.74 + (abs(imbalance) * 0.15)
+                if htf_trend == "bearish":
                     confidence += 0.05
+                if trend_strength > 0.4:
+                    confidence += 0.04
 
         return {
             "signal": signal,
@@ -534,18 +537,18 @@ class TradingDecisionAgent(BaseAgent):
             proximity_bonus = 0.08 * (1 - abs_dist / 0.005)
 
             # Bounce up from VWAP — only if HTF trend is not bearish
-            if distance_pct > -0.001 and rsi > 45 and htf_trend != "bearish":
+            if distance_pct > -0.003 and rsi > 45 and htf_trend != "bearish":
                 signal = "long"
-                confidence = 0.72 + proximity_bonus
+                confidence = 0.74 + proximity_bonus
                 if htf_trend == "bullish":
                     confidence += 0.06
                 if relative_volume >= 1.5:
                     confidence += 0.03  # Volume spike bonus
 
             # Bounce down from VWAP — only if HTF trend is not bullish
-            elif distance_pct < 0.001 and rsi < 55 and htf_trend != "bullish":
+            elif distance_pct < 0.003 and rsi < 55 and htf_trend != "bullish":
                 signal = "short"
-                confidence = 0.72 + proximity_bonus
+                confidence = 0.74 + proximity_bonus
                 if htf_trend == "bearish":
                     confidence += 0.06
                 if relative_volume >= 1.5:
@@ -696,7 +699,7 @@ class TradingDecisionAgent(BaseAgent):
         dist_from_ema21 = (price - ema_21) / ema_21
 
         # LONG: oversold dip in uptrend
-        if (25 < rsi < 40
+        if (28 < rsi < 45
                 and htf_trend == "bullish"
                 and ema_21 > ema_50  # Uptrend structure
                 and -0.015 < dist_from_ema21 < 0.005  # Near or slightly below EMA21
@@ -704,20 +707,20 @@ class TradingDecisionAgent(BaseAgent):
             signal = "long"
             confidence = 0.74
             # RSI deeper = stronger pullback signal
-            if rsi < 32:
+            if rsi < 35:
                 confidence += 0.05
             if imbalance > 0.1:  # Buyers stepping in
                 confidence += 0.04
 
         # SHORT: overbought rally in downtrend
-        elif (60 < rsi < 75
+        elif (55 < rsi < 72
               and htf_trend == "bearish"
               and ema_21 < ema_50  # Downtrend structure
               and -0.005 < dist_from_ema21 < 0.015  # Near or slightly above EMA21
               and histogram < 0.5):  # MACD not deeply bullish
             signal = "short"
             confidence = 0.74
-            if rsi > 68:
+            if rsi > 65:
                 confidence += 0.05
             if imbalance < -0.1:  # Sellers stepping in
                 confidence += 0.04

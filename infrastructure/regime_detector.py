@@ -7,14 +7,14 @@ one of 9 regimes. Trading Decision Agent reads the current regime
 and applies multipliers to strategy parameters.
 
 Regimes and their parameter multipliers:
-- TREND_FOLLOWING: TP 3.0x, SL 0.8x, size 1.0x, min_conf 0.80, hold 1.5x
-- MEAN_REVERSION: TP 1.5x, SL 1.2x, size 1.0x, min_conf 0.75, hold 0.8x
-- HIGH_VOLATILITY: TP 2.0x, SL 1.5x, size 0.6x, min_conf 0.85, hold 0.5x
-- GREED_EUPHORIA: TP 3.0x, SL 1.0x, size 0.8x, min_conf 0.80, hold 1.0x (LONG only)
-- FEAR_CAPITULATION: TP 3.0x, SL 1.0x, size 0.8x, min_conf 0.80, hold 1.0x (SHORT only)
-- LOW_VOLATILITY: TP 1.2x, SL 1.0x, size 1.0x, min_conf 0.85, hold 0.8x
-- ACCUMULATION: TP 2.5x, SL 1.0x, size 0.8x, min_conf 0.75, hold 1.2x (LONG bias)
-- DISTRIBUTION: TP 2.5x, SL 1.0x, size 0.8x, min_conf 0.75, hold 1.2x (SHORT bias)
+- TREND_FOLLOWING: TP 3.0x, SL 0.8x, size 1.0x, min_conf 0.72, hold 1.5x
+- MEAN_REVERSION: TP 1.5x, SL 1.2x, size 1.0x, min_conf 0.70, hold 0.8x
+- HIGH_VOLATILITY: TP 2.0x, SL 1.5x, size 0.6x, min_conf 0.78, hold 0.5x
+- GREED_EUPHORIA: TP 3.0x, SL 1.0x, size 0.8x, min_conf 0.72, hold 1.0x (LONG only)
+- FEAR_CAPITULATION: TP 3.0x, SL 1.0x, size 0.8x, min_conf 0.72, hold 1.0x (SHORT only)
+- LOW_VOLATILITY: TP 1.2x, SL 1.0x, size 1.0x, min_conf 0.78, hold 0.8x
+- ACCUMULATION: TP 2.5x, SL 1.0x, size 0.8x, min_conf 0.70, hold 1.2x (LONG bias)
+- DISTRIBUTION: TP 2.5x, SL 1.0x, size 0.8x, min_conf 0.70, hold 1.2x (SHORT bias)
 - DEFAULT: no modifications (config values used as-is)
 """
 
@@ -34,7 +34,7 @@ REGIME_PARAMS = {
         "tp_multiplier": 3.0,
         "sl_multiplier": 0.8,
         "position_size_multiplier": 1.0,
-        "min_confidence": 0.80,
+        "min_confidence": 0.72,
         "hold_time_multiplier": 1.5,
     },
     "MEAN_REVERSION": {
@@ -42,7 +42,7 @@ REGIME_PARAMS = {
         "tp_multiplier": 1.5,
         "sl_multiplier": 1.2,
         "position_size_multiplier": 1.0,
-        "min_confidence": 0.75,
+        "min_confidence": 0.70,
         "hold_time_multiplier": 0.8,
     },
     "HIGH_VOLATILITY": {
@@ -50,7 +50,7 @@ REGIME_PARAMS = {
         "tp_multiplier": 2.0,
         "sl_multiplier": 1.5,
         "position_size_multiplier": 0.6,
-        "min_confidence": 0.85,
+        "min_confidence": 0.78,
         "hold_time_multiplier": 0.5,
     },
     "GREED_EUPHORIA": {
@@ -58,7 +58,7 @@ REGIME_PARAMS = {
         "tp_multiplier": 3.0,
         "sl_multiplier": 1.0,
         "position_size_multiplier": 0.8,
-        "min_confidence": 0.80,
+        "min_confidence": 0.72,
         "hold_time_multiplier": 1.0,
     },
     "FEAR_CAPITULATION": {
@@ -66,7 +66,7 @@ REGIME_PARAMS = {
         "tp_multiplier": 3.0,
         "sl_multiplier": 1.0,
         "position_size_multiplier": 0.8,
-        "min_confidence": 0.80,
+        "min_confidence": 0.72,
         "hold_time_multiplier": 1.0,
     },
     "LOW_VOLATILITY": {
@@ -74,7 +74,7 @@ REGIME_PARAMS = {
         "tp_multiplier": 1.2,
         "sl_multiplier": 1.0,
         "position_size_multiplier": 1.0,
-        "min_confidence": 0.85,
+        "min_confidence": 0.78,
         "hold_time_multiplier": 0.8,
     },
     "ACCUMULATION": {
@@ -82,7 +82,7 @@ REGIME_PARAMS = {
         "tp_multiplier": 2.5,
         "sl_multiplier": 1.0,
         "position_size_multiplier": 0.8,
-        "min_confidence": 0.75,
+        "min_confidence": 0.70,
         "hold_time_multiplier": 1.2,
     },
     "DISTRIBUTION": {
@@ -90,7 +90,7 @@ REGIME_PARAMS = {
         "tp_multiplier": 2.5,
         "sl_multiplier": 1.0,
         "position_size_multiplier": 0.8,
-        "min_confidence": 0.75,
+        "min_confidence": 0.70,
         "hold_time_multiplier": 1.2,
     },
     "DEFAULT": {
@@ -168,7 +168,7 @@ class RegimeDetector:
         regime_config = config.get("regime_detection", {})
         self.enabled = regime_config.get("enabled", False)
         self.interval_seconds = regime_config.get("interval_seconds", 900)
-        self.model = regime_config.get("model", "claude-haiku-4-5-20251001")
+        self.model = regime_config.get("model", "claude-sonnet-4-5-20251001")
         self.fallback_regime = regime_config.get("fallback_regime", "DEFAULT")
 
         self._thread: Optional[threading.Thread] = None

@@ -102,9 +102,10 @@ class TrailingStopMonitor:
         self.position_levels = {}
         self.closing_in_progress = set()  # prevent race conditions
 
-        # Symbol rules for quantity rounding (reuse from OrderExecutor)
-        self.SYMBOL_RULES = OrderExecutor.FALLBACK_SYMBOL_RULES
+        # Symbol rules for quantity rounding — start with fallbacks, then load real from Binance
+        self.SYMBOL_RULES = dict(OrderExecutor.FALLBACK_SYMBOL_RULES)
         self.DEFAULT_RULES = OrderExecutor.DEFAULT_RULES
+        self._load_exchange_info()
 
         logger.info(
             "TrailingStopMonitor initialized",
@@ -115,6 +116,33 @@ class TrailingStopMonitor:
             max_holding_seconds=self.max_holding_time_seconds,
             execution_mode=self.execution_mode,
         )
+
+    def _load_exchange_info(self):
+        """Fetch real symbol precision rules from Binance at startup."""
+        try:
+            configured_symbols = self.config.get("trading", {}).get("symbols", [])
+            if not configured_symbols:
+                configured_symbols = list(self.SYMBOL_RULES.keys())
+
+            exchange_rules = self.binance_client.get_symbol_info(configured_symbols)
+
+            for symbol, rules in exchange_rules.items():
+                self.SYMBOL_RULES[symbol] = {
+                    "min_qty": rules["min_qty"],
+                    "step_size": rules["step_size"],
+                    "min_notional": rules["min_notional"],
+                    "price_precision": rules.get("price_precision", 2),
+                }
+
+            logger.info(
+                "TrailingStop exchange info loaded",
+                symbols_updated=len(exchange_rules)
+            )
+        except Exception as e:
+            logger.warning(
+                "TrailingStop failed to load exchange info, using fallback rules",
+                error=str(e)
+            )
 
     def check_all_positions(self):
         """
@@ -509,6 +537,7 @@ class TrailingStopMonitor:
 
     def _round_price(self, symbol: str, price: float) -> float:
         """Round price to symbol's price precision."""
+        self._ensure_symbol_rules(symbol)
         rules = self.SYMBOL_RULES.get(symbol, self.DEFAULT_RULES)
         precision = rules.get("price_precision", 2)
         return round(price, precision)
@@ -1327,8 +1356,29 @@ class TrailingStopMonitor:
             logger.warning("Failed to get Binance position qty", symbol=symbol, error=str(e))
         return 0.0
 
+    def _ensure_symbol_rules(self, symbol: str):
+        """Load exchange rules for a symbol if not already cached."""
+        if symbol in self.SYMBOL_RULES:
+            return
+        try:
+            exchange_rules = self.binance_client.get_symbol_info([symbol])
+            if symbol in exchange_rules:
+                r = exchange_rules[symbol]
+                self.SYMBOL_RULES[symbol] = {
+                    "min_qty": r["min_qty"],
+                    "step_size": r["step_size"],
+                    "min_notional": r["min_notional"],
+                    "price_precision": r.get("price_precision", 2),
+                }
+                logger.info("Loaded exchange rules on-demand", symbol=symbol,
+                            step_size=r["step_size"], min_qty=r["min_qty"])
+        except Exception as e:
+            logger.warning("Failed to load exchange rules on-demand, using defaults",
+                           symbol=symbol, error=str(e))
+
     def _round_quantity(self, symbol: str, quantity: float) -> float:
         """Round quantity to symbol's step size."""
+        self._ensure_symbol_rules(symbol)
         rules = self.SYMBOL_RULES.get(symbol, self.DEFAULT_RULES)
         step = rules["step_size"]
         rounded = math.floor(quantity / step) * step

@@ -44,7 +44,7 @@ symbol_scanner:
 risk:
   # Position sizing limits
   max_risk_per_trade_pct: 0.03  # 3% of account per trade (conservative)
-  max_daily_drawdown_pct: 0.06  # 6% daily drawdown limit
+  max_daily_drawdown_pct: 0.15  # 7.5% daily drawdown limit (~$15 on $200)
   max_portfolio_exposure_pct: 0.55  # 55% max capital deployed
   max_position_concentration_pct: 0.25  # Single position max 25%
 
