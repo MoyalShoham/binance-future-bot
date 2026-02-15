@@ -342,7 +342,7 @@ class StorageReporterAgent(BaseAgent):
             quantity=order_details.get("filled_quantity", 0.0),
             leverage=order_details.get("leverage", 1),
             entry_time=datetime.fromisoformat(execution_data["timestamp"]),
-            fees_usdt=order_details.get("commission_usdt", 0.0),
+            fees_usdt=order_details.get("fees_usdt", 0.0),
             unrealized_pnl_usdt=0.0,
             is_closed=False,
             sl_order_id=sl_order_id,

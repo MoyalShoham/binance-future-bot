@@ -1,79 +1,95 @@
 # Multi-Agent AI Trading System for Binance Futures
 
-## Overview
+Autonomous multi-agent trading system for Binance Futures scalping. 6 specialized agents handle market research, trade decisions, risk management, order execution, data persistence, and system health monitoring.
 
-Production-grade, fully autonomous multi-agent AI trading system for Binance Futures with paper trading, live trading, and hybrid execution modes.
+## Quick Start
+
+```bash
+# 1. Set up environment
+cp .env.example .env
+# Add: BINANCE_API_KEY, BINANCE_API_SECRET, ANTHROPIC_API_KEY
+
+# 2. Install dependencies
+pip install -r requirements.txt
+
+# 3. Run paper trading
+python main.py --mode paper --symbol BTCUSDT --continuous --interval 30
+
+# 4. Run live trading (dynamic symbol selection)
+python main.py --mode live --symbol all --continuous --interval 5
+```
 
 ## Architecture
 
-- **Specialized Agent Model**: Role-separated agents with clear authority boundaries
-- **LangChain Orchestration**: Supervisor/coordinator pattern with LangGraph state management
-- **Cheap-Model-First Routing**: GPT Nano → Gemini Flash → Claude Haiku → Claude Sonnet
-- **JSON-Only Communication**: Deterministic schemas with validation
-- **Hook-Driven Automation**: Event triggers for safety checks and audit logging
+```
+Symbol Scanner (Binance + CoinGecko + CryptoPanic)
+         |
+         v
+Research Coordinator --> Trading Decision --> Risk Manager --> Execution --> Storage
+  (indicators,           (6 strategies,      (12 checks,      (Binance API,   (SQLite,
+   WebSocket+REST)        learning system)    kill switches)    algo SL/TP)     audit trail)
 
-## Core Agents
+Background: Emergency Controller (health + trailing stop) | Regime Detector (Claude Haiku, 15min)
+```
 
-1. **Research Coordinator**: Orchestrate market research sub-agents
-2. **Trading Decision**: Evaluate indicators and apply scalping strategies
-3. **Risk Manager**: Global authority over all trades (approve/reject/modify)
-4. **Execution Agent**: Interface with Binance Futures API
-5. **Storage & Reporting**: Persist data and generate analytics
-6. **Emergency Controller**: Monitor system health and trigger kill switches
+### Agents
+
+| Agent | Role |
+|-------|------|
+| **Research Coordinator** | Market data, technical indicators (EMA, VWAP, RSI, MACD, ATR, Bollinger), multi-timeframe analysis |
+| **Trading Decision** | 6 scalping strategies, learning system (6 components), Kelly sizing, fee filter |
+| **Risk Manager** | Global authority over all trades. 12 risk checks, kill switches, duplicate guard |
+| **Execution Agent** | Binance Futures API. PAPER/LIVE/HYBRID modes. Algo SL/TP orders |
+| **Storage & Reporting** | SQLite persistence, SHA-256 audit trail, performance reports |
+| **Emergency Controller** | Health monitoring, trailing stop management, orphan reconciliation |
+
+### Strategies
+
+| Strategy | Timeframe | Entry Trigger |
+|----------|-----------|---------------|
+| EMA Crossover | 5m | EMA(9)/EMA(21) crossover + trend strength |
+| VWAP Bounce | 1m | Price near VWAP + volume confirmation |
+| RSI Pullback | 5m | RSI reversal in trend + MACD confirmation |
+| Bollinger Squeeze | 5m | Low bandwidth + breakout + volume gate |
 
 ## Execution Modes
 
-- **Paper Trading**: Simulate orders with realistic slippage
-- **Live Trading**: Real orders with shadow paper execution for comparison
-- **Hybrid**: Both modes simultaneously with divergence alerts
+| Mode | Description |
+|------|-------------|
+| **Paper** | Simulated orders with realistic slippage (5 bps + market impact) |
+| **Live** | Real Binance orders + shadow paper execution for comparison |
+| **Hybrid** | Both modes with divergence alerts (>0.5% threshold) |
 
-## Safety Features
+## Configuration
 
-- Kill switches (global, symbol, strategy, volatility circuit breaker)
-- Pre-trade validation hooks
-- Post-execution audit logging
-- Dynamic risk controls with override authority
-- Immutable audit trail with hash chains
+All parameters in `config/trading_config.yaml`:
 
-## Implementation Status
-
-See `IMPLEMENTATION_SUMMARY.md` for detailed progress tracking.
-
-## Getting Started
-
-```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Configure trading parameters
-cp config/trading_config.yaml.example config/trading_config.yaml
-# Edit config/trading_config.yaml with your settings
-
-# Set up Binance API credentials
-cp .env.example .env
-# Add your API keys to .env
-
-# Run in paper trading mode
-python main.py --mode paper
-
-# Check status
-python cli.py /trade-status
-```
+- Risk limits (3% per trade, 8.5% daily drawdown, 55% max exposure)
+- Leverage (5x default, volatility-adjusted)
+- Strategy parameters and enable/disable toggles
+- Trailing stop settings (dynamic SL/TP, time exits)
+- Model routing and LLM configuration
+- Symbol scanner settings
 
 ## Documentation
 
-- `docs/architecture.md`: System architecture overview
-- `docs/agent_communication.md`: JSON schema specifications
-- `docs/risk_management.md`: Risk control mechanisms
-- `docs/deployment.md`: Production deployment guide
+| Document | Description |
+|----------|-------------|
+| [`CLAUDE.md`](CLAUDE.md) | Project conventions, file structure, gotchas |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Full system architecture and implementation details |
+| [`docs/DATABASE.md`](docs/DATABASE.md) | Database schema, queries, maintenance |
+| [`docs/RISK_MANAGEMENT.md`](docs/RISK_MANAGEMENT.md) | Risk controls and safety mechanisms |
+| [`docs/SETUP.md`](docs/SETUP.md) | Environment setup and installation |
+| [`docs/TESTING.md`](docs/TESTING.md) | Testing scenarios and verification |
+| [`agents/*.md`](agents/) | Individual agent specifications |
 
-## Development
+## Safety
 
-Branches are used for each implementation phase:
-- `feature/phase1-core-infrastructure`: Core schemas, orchestration, risk manager
-- `feature/phase2-agents`: Agent implementations
-- `feature/phase3-strategies`: Trading strategies and skills
-- `feature/phase4-testing`: Configuration and testing
+- Kill switches (global, per-symbol, per-strategy, volatility circuit breaker)
+- Pre-trade validation (risk checks, fee filter, duplicate guard)
+- Post-execution audit trail (SHA-256 hash chain)
+- Dynamic trailing stop with orphan reconciliation
+- Consecutive loss cooldown (3 losses in 30min -> 15min pause)
 
 ## License
 

@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "sqlite": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@anthropic/mcp-server-sqlite",
+        "data/trading_system.db"
+      ]
+    }
+  }
+}

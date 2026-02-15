@@ -978,13 +978,14 @@ class TrailingStopMonitor:
             qty = close_quantity if close_quantity and close_quantity > 0 else position.quantity
             is_long = position.side == "LONG"
             if is_long:
-                raw_pnl = (exit_price - position.entry_price) * qty * position.leverage
+                raw_pnl = (exit_price - position.entry_price) * qty
             else:
-                raw_pnl = (position.entry_price - exit_price) * qty * position.leverage
+                raw_pnl = (position.entry_price - exit_price) * qty
 
-            notional = position.entry_price * qty
+            entry_notional = position.entry_price * qty
+            exit_notional = exit_price * qty
             fee_rate = self.taker_fee_bps / 10000
-            total_fees = notional * fee_rate * 2
+            total_fees = (entry_notional + exit_notional) * fee_rate
             realized_pnl = raw_pnl - total_fees
 
         holding_seconds = int((datetime.utcnow() - position.entry_time).total_seconds())
