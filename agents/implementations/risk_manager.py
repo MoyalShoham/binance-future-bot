@@ -559,12 +559,15 @@ class RiskManagerAgent(BaseAgent):
         trading_decision: Dict[str, Any],
         account_status: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Check 8: Position Concentration"""
+        """Check 8: Position Concentration (margin-based, not notional)"""
 
         position_size_usdt = trading_decision.get("position_size_usdt", 0)
         total_equity = max(account_status.get("total_equity", 1), 0.01)
 
-        concentration_pct = position_size_usdt / total_equity
+        # Use margin (notional / leverage) for concentration check, not raw notional
+        leverage = trading_decision.get("leverage", self.config.get("trading", {}).get("default_leverage", 5))
+        margin_required = position_size_usdt / max(leverage, 1)
+        concentration_pct = margin_required / total_equity
 
         passed = concentration_pct <= self.max_position_concentration_pct
 
@@ -574,9 +577,9 @@ class RiskManagerAgent(BaseAgent):
             "limit": self.max_position_concentration_pct,
             "severity": "warning" if not passed else "info",
             "message": (
-                f"Position concentration {concentration_pct:.2%} exceeds limit {self.max_position_concentration_pct:.2%}"
+                f"Margin concentration {concentration_pct:.2%} exceeds limit {self.max_position_concentration_pct:.2%}"
                 if not passed
-                else f"Position concentration within limit ({concentration_pct:.2%} / {self.max_position_concentration_pct:.2%})"
+                else f"Margin concentration within limit ({concentration_pct:.2%} / {self.max_position_concentration_pct:.2%})"
             )
         }
 

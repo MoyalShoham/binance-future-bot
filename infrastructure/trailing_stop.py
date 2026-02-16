@@ -842,7 +842,10 @@ class TrailingStopMonitor:
         # === Initialize TP/SL levels for new position ===
         if pos_id not in self.position_levels:
             initial_sl = self._get_initial_sl(position, current_price, is_long, session)
-            initial_tp = self._calc_tp(current_price, is_long)
+            # Use TradingDecision TP if available, else fall back to ratchet calc
+            initial_tp = self._get_initial_tp(position, is_long, session)
+            if initial_tp is None:
+                initial_tp = self._calc_tp(current_price, is_long)
 
             self.position_levels[pos_id] = {
                 "tp": initial_tp,
@@ -897,6 +900,30 @@ class TrailingStopMonitor:
             return position.entry_price * (1 - self.hard_stop_fallback_pct)
         else:
             return position.entry_price * (1 + self.hard_stop_fallback_pct)
+
+    def _get_initial_tp(self, position: PnLLedger, is_long: bool, session) -> Optional[float]:
+        """Get TP price from original TradingDecision.take_profit_levels."""
+        try:
+            if not position.execution_id:
+                return None
+
+            result = (
+                session.query(TradingDecision.take_profit_levels)
+                .join(Execution, Execution.decision_id == TradingDecision.id)
+                .filter(Execution.id == position.execution_id)
+                .first()
+            )
+
+            if result and result[0]:
+                tp_levels = result[0]
+                if isinstance(tp_levels, list) and len(tp_levels) > 0:
+                    tp_price = tp_levels[0].get("price", 0)
+                    if tp_price > 0:
+                        return tp_price
+            return None
+        except Exception as e:
+            logger.error("Failed to get initial TP from decision", position_id=position.id, error=str(e))
+            return None
 
     def _calc_tp(self, price: float, is_long: bool) -> float:
         """Calculate TP level from a given price."""

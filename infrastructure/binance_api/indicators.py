@@ -147,6 +147,12 @@ class TechnicalIndicators:
             indicators["prev_ema_9"] = indicators["ema_9"]
             indicators["prev_ema_21"] = indicators["ema_21"]
 
+        # Previous candle close for VWAP bounce crossover detection
+        if len(df) >= 2:
+            indicators["prev_close"] = round(float(df["Close"].iloc[-2]), 6)
+        else:
+            indicators["prev_close"] = indicators.get("ema_21", 0)
+
         logger.debug("Technical indicators calculated", ema_9=indicators["ema_9"], rsi=indicators["rsi"], hourly_vol=hourly_volatility_pct)
 
         return indicators

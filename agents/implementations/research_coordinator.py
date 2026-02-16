@@ -282,10 +282,16 @@ class ResearchCoordinatorAgent(BaseAgent):
                 price_change_pct = float(ticker.get("priceChangePercent", 0)) / 100
 
             if ws_book:
+                # Compute top-of-book imbalance from bid/ask quantities
+                bid_qty = ws_book.get("best_bid_qty", 0)
+                ask_qty = ws_book.get("best_ask_qty", 0)
+                total_qty = bid_qty + ask_qty
+                ws_imbalance = (bid_qty - ask_qty) / total_qty if total_qty > 0 else 0
+
                 order_book_data = {
-                    "bid_depth": 0,  # Not available from book ticker stream
-                    "ask_depth": 0,
-                    "imbalance_ratio": 0,
+                    "bid_depth": bid_qty,
+                    "ask_depth": ask_qty,
+                    "imbalance_ratio": round(ws_imbalance, 4),
                     "best_bid": ws_book["best_bid"],
                     "best_ask": ws_book["best_ask"],
                     "spread_bps": ws_book["spread_bps"],
@@ -311,16 +317,21 @@ class ResearchCoordinatorAgent(BaseAgent):
                 technical_indicators = self._get_default_indicators()
 
             # Higher timeframe trend bias (multi-TF confirmation)
+            # Relaxed: require EMA9 vs EMA21 alignment (not all 3 perfectly aligned)
             htf_trend = "neutral"
             if htf_klines and len(htf_klines) >= 50:
                 htf_indicators = self.indicators.calculate_all(htf_klines, current_price)
                 htf_ema9 = htf_indicators.get("ema_9", 0)
                 htf_ema21 = htf_indicators.get("ema_21", 0)
                 htf_ema50 = htf_indicators.get("ema_50", 0)
-                if htf_ema9 > htf_ema21 > htf_ema50:
+                if htf_ema9 > htf_ema21 and htf_ema21 > htf_ema50:
                     htf_trend = "bullish"
-                elif htf_ema9 < htf_ema21 < htf_ema50:
+                elif htf_ema9 < htf_ema21 and htf_ema21 < htf_ema50:
                     htf_trend = "bearish"
+                elif htf_ema9 > htf_ema21:
+                    htf_trend = "weak_bullish"
+                elif htf_ema9 < htf_ema21:
+                    htf_trend = "weak_bearish"
             technical_indicators["htf_trend"] = htf_trend
             technical_indicators["htf_timeframe"] = higher_tf
 

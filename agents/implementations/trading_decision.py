@@ -98,7 +98,7 @@ class TradingDecisionAgent(BaseAgent):
         self.fee_buffer_multiplier = fee_filter_config.get("fee_buffer_multiplier", 1.5)
 
         # Confidence threshold for trades
-        self.min_confidence = 0.70  # Minimum 70% confidence to trade
+        self.min_confidence = 0.78  # Minimum 78% confidence to trade (raised from 70%)
 
         # Risk config filters
         risk_config = config.get("risk", {})
@@ -467,24 +467,35 @@ class TradingDecisionAgent(BaseAgent):
         # Bearish crossover: was above/equal, now below
         bearish_cross = prev_ema_9 >= prev_ema_21 and ema_9 < ema_21
 
-        # HTF trend: require not against (bullish or neutral for longs)
-        if bullish_cross and price > ema_50 and htf_trend != "bearish":
-            if imbalance > 0.05 and 35 < rsi < 70:
-                signal = "long"
-                confidence = 0.74 + (abs(imbalance) * 0.15)
-                if htf_trend == "bullish":
-                    confidence += 0.05  # Bonus for full alignment
-                if trend_strength > 0.4:
-                    confidence += 0.04
+        # HTF trend: block contra-trend trades (bearish/weak_bearish blocks longs)
+        htf_bearish = htf_trend in ("bearish", "weak_bearish")
+        htf_bullish = htf_trend in ("bullish", "weak_bullish")
 
-        elif bearish_cross and price < ema_50 and htf_trend != "bullish":
-            if imbalance < -0.05 and 30 < rsi < 65:
-                signal = "short"
-                confidence = 0.74 + (abs(imbalance) * 0.15)
-                if htf_trend == "bearish":
-                    confidence += 0.05
+        if bullish_cross and price > ema_50 and not htf_bearish:
+            if 40 < rsi < 65:
+                signal = "long"
+                confidence = 0.72 + (abs(imbalance) * 0.15)
+                if htf_trend == "bullish":
+                    confidence += 0.06  # Bonus for full alignment
+                elif htf_trend == "weak_bullish":
+                    confidence += 0.03
                 if trend_strength > 0.4:
                     confidence += 0.04
+                if imbalance > 0.1:
+                    confidence += 0.03
+
+        elif bearish_cross and price < ema_50 and not htf_bullish:
+            if 35 < rsi < 60:
+                signal = "short"
+                confidence = 0.72 + (abs(imbalance) * 0.15)
+                if htf_trend == "bearish":
+                    confidence += 0.06
+                elif htf_trend == "weak_bearish":
+                    confidence += 0.03
+                if trend_strength > 0.4:
+                    confidence += 0.04
+                if imbalance < -0.1:
+                    confidence += 0.03
 
         return {
             "signal": signal,
@@ -496,63 +507,76 @@ class TradingDecisionAgent(BaseAgent):
         research_summary: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        Strategy 2: VWAP Bounce Scalp (widened zone + volume confirmation)
+        Strategy 2: VWAP Bounce Scalp
 
         Entry:
-        - LONG: Price near VWAP and bouncing up, HTF trend not bearish
-        - SHORT: Price near VWAP and bouncing down, HTF trend not bullish
+        - LONG: Price crosses above VWAP from below (actual bounce), HTF not bearish
+        - SHORT: Price crosses below VWAP from above (actual bounce), HTF not bullish
 
         Confirmation:
-        - RSI confirms direction
-        - Graduated confidence: closer to VWAP = higher confidence
-        - Volume activity (relative_volume >= 0.8)
+        - RSI confirms direction (>50 for long, <50 for short)
+        - Relative volume >= 1.2
+        - Previous candle was on opposite side of VWAP (proves a cross happened)
         """
         tech_ind = research_summary.get("technical_indicators", {})
         market_data = research_summary.get("market_data", {})
 
         vwap = tech_ind.get("vwap", 0)
         price = market_data.get("price", 0)
+        prev_close = tech_ind.get("prev_close", 0)
         rsi = tech_ind.get("rsi", 50)
         htf_trend = tech_ind.get("htf_trend", "neutral")
         relative_volume = tech_ind.get("relative_volume", 1.0)
 
-        if vwap == 0:
+        if vwap == 0 or price == 0:
             return {"signal": "neutral", "confidence": 0.0}
 
-        # Volume gate: need reasonable activity
-        if relative_volume < 0.8:
+        # Volume gate: require meaningful activity
+        if relative_volume < 1.2:
             return {"signal": "neutral", "confidence": 0.5}
 
-        # Calculate distance from VWAP
+        # Distance from VWAP — must be within tight zone (0.15%)
         distance_pct = (price - vwap) / vwap
         abs_dist = abs(distance_pct)
+
+        if abs_dist > 0.0015:
+            return {"signal": "neutral", "confidence": 0.5}
 
         signal = "neutral"
         confidence = 0.5
 
-        # Widened zone: within 0.5% of VWAP (was 0.2%)
-        if abs_dist < 0.005:
-            # Graduated confidence: closer to VWAP = stronger signal
-            # 0.0% distance → +0.08 bonus, 0.5% distance → +0.00
-            proximity_bonus = 0.08 * (1 - abs_dist / 0.005)
+        # Graduated confidence: closer to VWAP = stronger signal
+        proximity_bonus = 0.06 * (1 - abs_dist / 0.0015)
 
-            # Bounce up from VWAP — only if HTF trend is not bearish
-            if distance_pct > -0.003 and rsi > 45 and htf_trend != "bearish":
-                signal = "long"
-                confidence = 0.74 + proximity_bonus
-                if htf_trend == "bullish":
-                    confidence += 0.06
-                if relative_volume >= 1.5:
-                    confidence += 0.03  # Volume spike bonus
+        # Determine if price crossed VWAP (prev candle was on other side)
+        prev_dist = (prev_close - vwap) / vwap if prev_close > 0 and vwap > 0 else 0
 
-            # Bounce down from VWAP — only if HTF trend is not bullish
-            elif distance_pct < 0.003 and rsi < 55 and htf_trend != "bullish":
-                signal = "short"
-                confidence = 0.74 + proximity_bonus
-                if htf_trend == "bearish":
-                    confidence += 0.06
-                if relative_volume >= 1.5:
-                    confidence += 0.03
+        htf_bearish = htf_trend in ("bearish", "weak_bearish")
+        htf_bullish = htf_trend in ("bullish", "weak_bullish")
+
+        # LONG bounce: price was below VWAP, now at or above it
+        if (prev_dist < -0.0003 and distance_pct >= 0
+                and rsi > 50 and not htf_bearish):
+            signal = "long"
+            confidence = 0.68 + proximity_bonus
+            if htf_trend == "bullish":
+                confidence += 0.06
+            elif htf_trend == "weak_bullish":
+                confidence += 0.03
+            if relative_volume >= 2.0:
+                confidence += 0.04
+
+        # SHORT bounce: price was above VWAP, now at or below it
+        elif (prev_dist > 0.0003 and distance_pct <= 0
+              and rsi < 50 and not htf_bullish):
+            signal = "short"
+            confidence = 0.68 + proximity_bonus
+            if htf_trend == "bearish":
+                confidence += 0.06
+            elif htf_trend == "weak_bearish":
+                confidence += 0.03
+            if relative_volume >= 2.0:
+                confidence += 0.04
 
         return {
             "signal": signal,
@@ -698,30 +722,37 @@ class TradingDecisionAgent(BaseAgent):
         # Distance from EMA21 — pullback should be close, not a crash
         dist_from_ema21 = (price - ema_21) / ema_21
 
+        htf_bull = htf_trend in ("bullish", "weak_bullish")
+        htf_bear = htf_trend in ("bearish", "weak_bearish")
+
         # LONG: oversold dip in uptrend
         if (28 < rsi < 45
-                and htf_trend == "bullish"
+                and htf_bull
                 and ema_21 > ema_50  # Uptrend structure
                 and -0.015 < dist_from_ema21 < 0.005  # Near or slightly below EMA21
                 and histogram > -0.5):  # MACD not deeply bearish (recovering)
             signal = "long"
-            confidence = 0.74
+            confidence = 0.72
+            if htf_trend == "bullish":
+                confidence += 0.03  # Bonus for strong trend
             # RSI deeper = stronger pullback signal
             if rsi < 35:
-                confidence += 0.05
+                confidence += 0.06
             if imbalance > 0.1:  # Buyers stepping in
                 confidence += 0.04
 
         # SHORT: overbought rally in downtrend
         elif (55 < rsi < 72
-              and htf_trend == "bearish"
+              and htf_bear
               and ema_21 < ema_50  # Downtrend structure
               and -0.005 < dist_from_ema21 < 0.015  # Near or slightly above EMA21
               and histogram < 0.5):  # MACD not deeply bullish
             signal = "short"
-            confidence = 0.74
+            confidence = 0.72
+            if htf_trend == "bearish":
+                confidence += 0.03
             if rsi > 65:
-                confidence += 0.05
+                confidence += 0.06
             if imbalance < -0.1:  # Sellers stepping in
                 confidence += 0.04
 
@@ -780,25 +811,32 @@ class TradingDecisionAgent(BaseAgent):
         if relative_volume < 1.2:
             return {"signal": "neutral", "confidence": 0.5}
 
+        htf_bearish = htf_trend in ("bearish", "weak_bearish")
+        htf_bullish = htf_trend in ("bullish", "weak_bullish")
+
         # Breakout above upper band
-        if price > upper and pct_b > 1.0 and htf_trend != "bearish":
+        if price > upper and pct_b > 1.0 and not htf_bearish:
             if rsi > 50:
                 signal = "long"
-                confidence = 0.74
+                confidence = 0.72
                 if htf_trend == "bullish":
-                    confidence += 0.05
+                    confidence += 0.06
+                elif htf_trend == "weak_bullish":
+                    confidence += 0.03
                 if relative_volume >= 2.0:
                     confidence += 0.04
                 if rsi > 60:
                     confidence += 0.03
 
         # Breakout below lower band
-        elif price < lower and pct_b < 0.0 and htf_trend != "bullish":
+        elif price < lower and pct_b < 0.0 and not htf_bullish:
             if rsi < 50:
                 signal = "short"
-                confidence = 0.74
+                confidence = 0.72
                 if htf_trend == "bearish":
-                    confidence += 0.05
+                    confidence += 0.06
+                elif htf_trend == "weak_bearish":
+                    confidence += 0.03
                 if relative_volume >= 2.0:
                     confidence += 0.04
                 if rsi < 40:
