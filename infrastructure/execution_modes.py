@@ -375,7 +375,8 @@ class OrderExecutor:
             entry_price = approval["entry_price"]
             leverage = approval["modified_parameters"]["leverage"]
 
-            # Set leverage
+            # Set isolated margin mode and leverage
+            self.binance_client.change_margin_type(symbol=symbol, margin_type="ISOLATED")
             self.binance_client.change_leverage(symbol=symbol, leverage=leverage)
 
             # Calculate quantity and round to symbol's step size

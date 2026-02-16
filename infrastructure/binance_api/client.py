@@ -599,6 +599,33 @@ class BinanceFuturesClient:
 
     # ========== Leverage & Margin ==========
 
+    def change_margin_type(self, symbol: str, margin_type: str = "ISOLATED") -> Dict[str, Any]:
+        """
+        Change margin type for symbol (ISOLATED or CROSSED).
+
+        Args:
+            symbol: Trading symbol
+            margin_type: "ISOLATED" or "CROSSED"
+
+        Returns:
+            Result
+        """
+        try:
+            result = self.client.futures_change_margin_type(
+                symbol=symbol,
+                marginType=margin_type
+            )
+            self.logger.info("Margin type changed", symbol=symbol, margin_type=margin_type)
+            return result
+
+        except BinanceAPIException as e:
+            # -4046 means margin type is already set to the requested type — not an error
+            if e.code == -4046:
+                self.logger.debug("Margin type already set", symbol=symbol, margin_type=margin_type)
+                return {"msg": "No need to change margin type."}
+            self.logger.error("Failed to change margin type", symbol=symbol, error=str(e))
+            raise
+
     def change_leverage(self, symbol: str, leverage: int) -> Dict[str, Any]:
         """
         Change leverage for symbol.
