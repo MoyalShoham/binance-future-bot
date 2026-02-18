@@ -98,7 +98,7 @@ class TradingDecisionAgent(BaseAgent):
         self.fee_buffer_multiplier = fee_filter_config.get("fee_buffer_multiplier", 1.5)
 
         # Confidence threshold for trades
-        self.min_confidence = 0.78  # Minimum 78% confidence to trade (raised from 70%)
+        self.min_confidence = 0.70  # Minimum 70% confidence (confluence gate handles quality filtering)
 
         # Risk config filters
         risk_config = config.get("risk", {})
@@ -109,6 +109,9 @@ class TradingDecisionAgent(BaseAgent):
         # Avoids re-evaluating funding rate/spread for symbols that were just rejected
         self._prefilter_cache: Dict[str, float] = {}
         self._prefilter_cache_ttl = 300  # 5 minutes
+
+        # Last confluence result (set during _make_decision, used in execute)
+        self._last_confluence: Optional[Dict[str, Any]] = None
 
         # ===== LEARNING CONFIG =====
         # Learning thresholds (configurable via config.learning or defaults)
@@ -259,6 +262,11 @@ class TradingDecisionAgent(BaseAgent):
             if size_mult != 1.0:
                 position_size_usdt = round(position_size_usdt * size_mult, 2)
 
+            # Apply confluence size multiplier (Q3=0.5x, Q4=1.0x, Q5=1.2x)
+            confluence = self._last_confluence
+            if confluence and confluence.get("size_multiplier", 1.0) != 1.0:
+                position_size_usdt = round(position_size_usdt * confluence["size_multiplier"], 2)
+
             # Fee viability check: reject trades where expected profit < fees * buffer
             if decision != "NO_TRADE" and self.fee_filter_enabled:
                 fee_viable, fee_reason = self._check_fee_viability(
@@ -346,7 +354,8 @@ class TradingDecisionAgent(BaseAgent):
                 "leverage": self.default_leverage,
                 "technical_signals": technical_signals,
                 "risk_metrics": risk_metrics,
-                "research_summary_hash": self.validator.compute_input_hash(research_summary)
+                "research_summary_hash": self.validator.compute_input_hash(research_summary),
+                "confluence": confluence if confluence else None
             }
 
             # Validate against schema
@@ -467,14 +476,33 @@ class TradingDecisionAgent(BaseAgent):
         # Bearish crossover: was above/equal, now below
         bearish_cross = prev_ema_9 >= prev_ema_21 and ema_9 < ema_21
 
+        # EMA convergence pre-signal: EMAs within 0.1 ATR of crossing + volume spike
+        relative_volume = tech_ind.get("relative_volume", 1.0)
+        ema_gap = abs(ema_9 - ema_21)
+        converging = ema_gap < (atr * 0.1) and relative_volume >= 1.5
+
+        # Pre-signal: about to cross with volume confirmation
+        if converging and not bullish_cross and not bearish_cross:
+            if ema_9 > ema_21 and prev_ema_9 > prev_ema_21:
+                # EMA9 still above but converging fast — potential bearish cross
+                pass  # Wait for actual cross
+            elif ema_9 < ema_21 and prev_ema_9 < prev_ema_21:
+                # EMA9 still below but converging fast — treat as early bullish signal
+                if price > ema_50:
+                    bullish_cross = True  # Early entry
+                elif price < ema_50:
+                    bearish_cross = True  # Early entry
+
         # HTF trend: block contra-trend trades (bearish/weak_bearish blocks longs)
         htf_bearish = htf_trend in ("bearish", "weak_bearish")
         htf_bullish = htf_trend in ("bullish", "weak_bullish")
 
+        base_conf = self._get_base_confidence("ema_crossover_scalp")
+
         if bullish_cross and price > ema_50 and not htf_bearish:
             if 40 < rsi < 65:
                 signal = "long"
-                confidence = 0.72 + (abs(imbalance) * 0.15)
+                confidence = base_conf + (abs(imbalance) * 0.15)
                 if htf_trend == "bullish":
                     confidence += 0.06  # Bonus for full alignment
                 elif htf_trend == "weak_bullish":
@@ -487,7 +515,7 @@ class TradingDecisionAgent(BaseAgent):
         elif bearish_cross and price < ema_50 and not htf_bullish:
             if 35 < rsi < 60:
                 signal = "short"
-                confidence = 0.72 + (abs(imbalance) * 0.15)
+                confidence = base_conf + (abs(imbalance) * 0.15)
                 if htf_trend == "bearish":
                     confidence += 0.06
                 elif htf_trend == "weak_bearish":
@@ -535,18 +563,18 @@ class TradingDecisionAgent(BaseAgent):
         if relative_volume < 1.2:
             return {"signal": "neutral", "confidence": 0.5}
 
-        # Distance from VWAP — must be within tight zone (0.15%)
+        # Distance from VWAP — widened to 0.5% zone for more opportunities
         distance_pct = (price - vwap) / vwap
         abs_dist = abs(distance_pct)
 
-        if abs_dist > 0.0015:
+        if abs_dist > 0.005:
             return {"signal": "neutral", "confidence": 0.5}
 
         signal = "neutral"
         confidence = 0.5
 
         # Graduated confidence: closer to VWAP = stronger signal
-        proximity_bonus = 0.06 * (1 - abs_dist / 0.0015)
+        proximity_bonus = 0.08 * (1 - abs_dist / 0.005)
 
         # Determine if price crossed VWAP (prev candle was on other side)
         prev_dist = (prev_close - vwap) / vwap if prev_close > 0 and vwap > 0 else 0
@@ -554,11 +582,13 @@ class TradingDecisionAgent(BaseAgent):
         htf_bearish = htf_trend in ("bearish", "weak_bearish")
         htf_bullish = htf_trend in ("bullish", "weak_bullish")
 
+        base_conf = self._get_base_confidence("vwap_bounce_scalp")
+
         # LONG bounce: price was below VWAP, now at or above it
-        if (prev_dist < -0.0003 and distance_pct >= 0
+        if (prev_dist < -0.001 and distance_pct >= 0
                 and rsi > 50 and not htf_bearish):
             signal = "long"
-            confidence = 0.68 + proximity_bonus
+            confidence = base_conf + proximity_bonus
             if htf_trend == "bullish":
                 confidence += 0.06
             elif htf_trend == "weak_bullish":
@@ -567,10 +597,10 @@ class TradingDecisionAgent(BaseAgent):
                 confidence += 0.04
 
         # SHORT bounce: price was above VWAP, now at or below it
-        elif (prev_dist > 0.0003 and distance_pct <= 0
+        elif (prev_dist > 0.001 and distance_pct <= 0
               and rsi < 50 and not htf_bullish):
             signal = "short"
-            confidence = 0.68 + proximity_bonus
+            confidence = base_conf + proximity_bonus
             if htf_trend == "bearish":
                 confidence += 0.06
             elif htf_trend == "weak_bearish":
@@ -657,10 +687,12 @@ class TradingDecisionAgent(BaseAgent):
         # Use relative volume instead of static 24h threshold
         volume_ok = volume_24h > 500000000 and relative_volume >= 1.5
 
+        base_conf = self._get_base_confidence("momentum_breakout_scalp")
+
         # Bullish breakout
         if histogram > 0 and rsi > 55 and price > ema_50 and volume_ok:
             signal = "long"
-            confidence = 0.75 + (min(rsi - 55, 20) / 100)
+            confidence = base_conf + (min(rsi - 55, 20) / 100)
             if htf_trend == "bullish":
                 confidence += 0.05
             # Bonus for very high relative volume
@@ -670,7 +702,7 @@ class TradingDecisionAgent(BaseAgent):
         # Bearish breakout
         elif histogram < 0 and rsi < 45 and price < ema_50 and volume_ok:
             signal = "short"
-            confidence = 0.75 + (min(45 - rsi, 20) / 100)
+            confidence = base_conf + (min(45 - rsi, 20) / 100)
             if htf_trend == "bearish":
                 confidence += 0.05
             if relative_volume >= 2.5:
@@ -725,6 +757,8 @@ class TradingDecisionAgent(BaseAgent):
         htf_bull = htf_trend in ("bullish", "weak_bullish")
         htf_bear = htf_trend in ("bearish", "weak_bearish")
 
+        base_conf = self._get_base_confidence("rsi_pullback_scalp")
+
         # LONG: oversold dip in uptrend
         if (28 < rsi < 45
                 and htf_bull
@@ -732,7 +766,7 @@ class TradingDecisionAgent(BaseAgent):
                 and -0.015 < dist_from_ema21 < 0.005  # Near or slightly below EMA21
                 and histogram > -0.5):  # MACD not deeply bearish (recovering)
             signal = "long"
-            confidence = 0.72
+            confidence = base_conf
             if htf_trend == "bullish":
                 confidence += 0.03  # Bonus for strong trend
             # RSI deeper = stronger pullback signal
@@ -748,7 +782,7 @@ class TradingDecisionAgent(BaseAgent):
               and -0.005 < dist_from_ema21 < 0.015  # Near or slightly above EMA21
               and histogram < 0.5):  # MACD not deeply bullish
             signal = "short"
-            confidence = 0.72
+            confidence = base_conf
             if htf_trend == "bearish":
                 confidence += 0.03
             if rsi > 65:
@@ -814,11 +848,13 @@ class TradingDecisionAgent(BaseAgent):
         htf_bearish = htf_trend in ("bearish", "weak_bearish")
         htf_bullish = htf_trend in ("bullish", "weak_bullish")
 
+        base_conf = self._get_base_confidence("bollinger_squeeze_scalp")
+
         # Breakout above upper band
         if price > upper and pct_b > 1.0 and not htf_bearish:
             if rsi > 50:
                 signal = "long"
-                confidence = 0.72
+                confidence = base_conf
                 if htf_trend == "bullish":
                     confidence += 0.06
                 elif htf_trend == "weak_bullish":
@@ -832,7 +868,7 @@ class TradingDecisionAgent(BaseAgent):
         elif price < lower and pct_b < 0.0 and not htf_bullish:
             if rsi < 50:
                 signal = "short"
-                confidence = 0.72
+                confidence = base_conf
                 if htf_trend == "bearish":
                     confidence += 0.06
                 elif htf_trend == "weak_bearish":
@@ -845,6 +881,127 @@ class TradingDecisionAgent(BaseAgent):
         return {
             "signal": signal,
             "confidence": min(1.0, confidence)
+        }
+
+    # ========== CONFLUENCE SCORING ==========
+
+    def _calculate_confluence_score(
+        self,
+        research_summary: Dict[str, Any],
+        direction: str
+    ) -> Dict[str, Any]:
+        """
+        Score 5 independent factors for confluence gate.
+        Requires multiple signals to agree before trading.
+
+        Factors:
+        1. Trend: HTF aligned + EMA direction agrees
+        2. Momentum: RSI + MACD histogram supports direction
+        3. Trend Strength: ADX > 25 (real trend exists)
+        4. Volume: Relative volume >= 1.3
+        5. Structure: Price near support (long) / resistance (short)
+
+        Returns:
+            {score, tier, factors, size_multiplier}
+        """
+        tech_ind = research_summary.get("technical_indicators", {})
+        market_data = research_summary.get("market_data", {})
+
+        is_long = direction == "LONG"
+        factors = {}
+        score = 0
+
+        # 1. Trend: HTF aligned + EMA direction agrees
+        htf_trend = tech_ind.get("htf_trend", "neutral")
+        ema_9 = tech_ind.get("ema_9", 0)
+        ema_21 = tech_ind.get("ema_21", 0)
+        if is_long:
+            trend_ok = htf_trend in ("bullish", "weak_bullish") and ema_9 > ema_21
+        else:
+            trend_ok = htf_trend in ("bearish", "weak_bearish") and ema_9 < ema_21
+        factors["trend"] = bool(trend_ok)
+        if trend_ok:
+            score += 1
+
+        # 2. Momentum: RSI + MACD histogram supports direction
+        rsi = tech_ind.get("rsi", 50)
+        macd_data = tech_ind.get("macd", {})
+        histogram = macd_data.get("histogram", 0)
+        if is_long:
+            momentum_ok = rsi > 45 and histogram > 0
+        else:
+            momentum_ok = rsi < 55 and histogram < 0
+        factors["momentum"] = bool(momentum_ok)
+        if momentum_ok:
+            score += 1
+
+        # 3. Trend Strength: ADX > 20 (independent of price direction)
+        adx = tech_ind.get("adx", 0)
+        trend_strength_ok = adx > 20
+        factors["trend_strength"] = bool(trend_strength_ok)
+        if trend_strength_ok:
+            score += 1
+
+        # 4. Volume: Relative volume >= 1.3
+        relative_volume = tech_ind.get("relative_volume", 1.0)
+        volume_ok = relative_volume >= 1.3
+        factors["volume"] = bool(volume_ok)
+        if volume_ok:
+            score += 1
+
+        # 5. Structure: Price near support (long) / resistance (short)
+        sr = tech_ind.get("support_resistance", {})
+        price = market_data.get("price", 0)
+        structure_ok = False
+        if sr and price > 0:
+            supports = sr.get("support", [])
+            resistances = sr.get("resistance", [])
+            atr = tech_ind.get("atr", 0) or (price * 0.01)
+            proximity_threshold = atr * 3  # Within 3 ATR of S/R level
+
+            if is_long and supports:
+                # Long: price near a support level
+                for s in supports:
+                    if s > 0 and abs(price - s) < proximity_threshold:
+                        structure_ok = True
+                        break
+            elif not is_long and resistances:
+                # Short: price near a resistance level
+                for r in resistances:
+                    if r > 0 and abs(price - r) < proximity_threshold:
+                        structure_ok = True
+                        break
+        factors["structure"] = bool(structure_ok)
+        if structure_ok:
+            score += 1
+
+        # Determine tier and size multiplier
+        # Q0-Q1: reject (0-1 factors = noise)
+        # Q2: trade with 0.5x size (marginal confirmation)
+        # Q3: trade with 0.75x size
+        # Q4: trade with 1.0x size
+        # Q5: trade with 1.2x size (full confluence)
+        if score <= 1:
+            tier = f"Q{score}"
+            size_multiplier = 0.0  # NO_TRADE
+        elif score == 2:
+            tier = "Q2"
+            size_multiplier = 0.5
+        elif score == 3:
+            tier = "Q3"
+            size_multiplier = 0.75
+        elif score == 4:
+            tier = "Q4"
+            size_multiplier = 1.0
+        else:
+            tier = "Q5"
+            size_multiplier = 1.2
+
+        return {
+            "score": score,
+            "tier": tier,
+            "factors": factors,
+            "size_multiplier": size_multiplier,
         }
 
     # ========== DECISION LOGIC ==========
@@ -898,8 +1055,31 @@ class TradingDecisionAgent(BaseAgent):
         # Make decision
         if best_confidence >= self.min_confidence and best_signal != "neutral":
             decision = "LONG" if best_signal == "long" else "SHORT"
+
+            # === CONFLUENCE GATE ===
+            if research_summary:
+                confluence = self._calculate_confluence_score(research_summary, decision)
+                self._last_confluence = confluence  # Store for later use in execute()
+
+                if confluence["score"] <= 1:
+                    logger.info(
+                        "Confluence rejection",
+                        strategy=best_strategy,
+                        decision=decision,
+                        confluence_score=confluence["score"],
+                        tier=confluence["tier"],
+                        factors=confluence["factors"],
+                    )
+                    return "NO_TRADE", best_strategy, best_confidence
+
+                # Confluence bonus: +3% confidence per factor above 2
+                bonus_factors = confluence["score"] - 2
+                if bonus_factors > 0:
+                    best_confidence = min(1.0, best_confidence + bonus_factors * 0.03)
+
             return decision, best_strategy, best_confidence
         else:
+            self._last_confluence = None
             return "NO_TRADE", best_strategy or "none", best_confidence
 
     def _calculate_levels(
@@ -964,14 +1144,33 @@ class TradingDecisionAgent(BaseAgent):
 
         if decision == "LONG":
             stop_loss = entry_price - sl_distance
+            raw_tp = entry_price + tp_distance
             take_profit_levels = [
-                {"price": entry_price + tp_distance, "quantity_pct": 1.0},
+                {"price": raw_tp, "quantity_pct": 1.0},
             ]
         else:  # SHORT
             stop_loss = entry_price + sl_distance
+            raw_tp = entry_price - tp_distance
             take_profit_levels = [
-                {"price": entry_price - tp_distance, "quantity_pct": 1.0},
+                {"price": raw_tp, "quantity_pct": 1.0},
             ]
+
+        # S/R-aware TP snap: if a S/R level is within 20% of TP distance, snap to it
+        sr = research_summary.get("technical_indicators", {}).get("support_resistance", {})
+        if sr and tp_distance > 0:
+            snap_threshold = tp_distance * 0.20
+            if decision == "LONG":
+                # Snap TP to nearest resistance (slightly below)
+                for r in sr.get("resistance", []):
+                    if r > entry_price and abs(r - raw_tp) < snap_threshold:
+                        take_profit_levels[0]["price"] = r * 0.999  # Just below resistance
+                        break
+            else:
+                # Snap TP to nearest support (slightly above)
+                for s in sr.get("support", []):
+                    if s < entry_price and abs(s - raw_tp) < snap_threshold:
+                        take_profit_levels[0]["price"] = s * 1.001  # Just above support
+                        break
 
         return entry_price, stop_loss, take_profit_levels
 
@@ -1174,6 +1373,21 @@ class TradingDecisionAgent(BaseAgent):
             f"{decision} signal from {strategy_name} strategy with {confidence:.0%} confidence. "
             f"Market regime: {market_regime}, RSI: {rsi:.0f}, Volatility: {volatility:.2%}."
         )
+
+    # ========== DATA-DRIVEN CONFIDENCE ==========
+
+    def _get_base_confidence(self, strategy_id: str) -> float:
+        """
+        Get data-driven base confidence for a strategy.
+        If 20+ trades: base = historical_win_rate * 0.9 (capped at 0.85).
+        If < 20 trades: base = 0.60 (conservative, forces strong confirmations).
+        """
+        stats = self._learning_cache.get("strategy_stats", {}).get(strategy_id)
+        if stats and stats.get("total_trades", 0) >= 20:
+            # Floor at 0.65 — learning adjustments in _make_decision() handle penalties separately
+            # Without a floor, bad historical win rate makes trading impossible (death spiral)
+            return max(0.65, min(0.85, stats["win_rate"] * 0.9))
+        return 0.65
 
     # ========== PRE-FILTERS ==========
 

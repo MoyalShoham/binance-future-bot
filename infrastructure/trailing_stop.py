@@ -98,6 +98,20 @@ class TrailingStopMonitor:
         # Dynamic SL states: {pnl_ledger_id: {"stage": ..., "current_sl": ..., "last_recalc_price": ..., "recalc_count": ..., "current_tp": ...}}
         self.sl_states = {}
 
+        # Strategy-specific expected holding times (expected * 3 = max)
+        self.strategy_holding_times = {
+            "ema_crossover_scalp": 180,       # 3 min expected -> 540s max
+            "vwap_bounce_scalp": 120,         # 2 min expected -> 360s max
+            "rsi_pullback_scalp": 180,        # 3 min expected -> 540s max
+            "bollinger_squeeze_scalp": 240,   # 4 min expected -> 720s max
+            "momentum_breakout_scalp": 240,   # 4 min expected -> 720s max
+            "orderbook_imbalance_scalp": 90,  # 1.5 min expected -> 270s max
+        }
+        self.holding_time_multiplier = 3  # max = expected * this
+
+        # Partial exit tracking: {pnl_ledger_id: {"partial_done": bool, "time_trim_done": bool}}
+        self.partial_exits = {}
+
         # In-memory state for legacy ratcheting: {pnl_ledger_id: {"tp": float, "sl": float, "ratchet_count": int}}
         self.position_levels = {}
         self.closing_in_progress = set()  # prevent race conditions
@@ -203,10 +217,11 @@ class TrailingStopMonitor:
 
                 # Clean up tracking for positions that no longer exist
                 open_ids = {p.id for p in open_positions}
-                stale_ids = (set(self.position_levels.keys()) | set(self.sl_states.keys())) - open_ids
+                stale_ids = (set(self.position_levels.keys()) | set(self.sl_states.keys()) | set(self.partial_exits.keys())) - open_ids
                 for stale_id in stale_ids:
                     self.position_levels.pop(stale_id, None)
                     self.sl_states.pop(stale_id, None)
+                    self.partial_exits.pop(stale_id, None)
                     self.closing_in_progress.discard(stale_id)
 
         except Exception as e:
@@ -237,10 +252,26 @@ class TrailingStopMonitor:
             return
 
         # Position still open on Binance — check time-based exit
+        # Use strategy-specific max holding time (3x expected)
+        max_hold = self._get_strategy_max_holding(position, session)
         holding_seconds = (datetime.utcnow() - position.entry_time).total_seconds()
-        if holding_seconds >= self.max_holding_time_seconds:
+        if holding_seconds >= max_hold:
             self._handle_time_exit(position, session)
             return
+
+        # Get current price for partial exit & time reduction checks
+        try:
+            current_price = self._get_current_price(position.symbol)
+        except Exception:
+            current_price = None
+
+        # Partial exit: close 50% at 0.5x TP, move SL to breakeven
+        if current_price and position.sl_order_id:
+            self._check_partial_exit(position, current_price, session)
+
+        # Time-based reduction: trim 25% of losing positions at 50% max hold
+        if current_price:
+            self._check_time_based_reduction(position, current_price, session)
 
         # Dynamic SL adjustment (breakeven + trail)
         if self.dynamic_sl_enabled and position.sl_order_id and self.execution_mode != "paper":
@@ -964,6 +995,183 @@ class TrailingStopMonitor:
             new_sl=round(new_sl, 6),
         )
 
+    # ========== PARTIAL EXITS & TIME-BASED REDUCTION ==========
+
+    def _get_strategy_max_holding(self, position: PnLLedger, session) -> int:
+        """Get strategy-specific max holding time (3x expected), falling back to global config."""
+        try:
+            if position.execution_id:
+                result = (
+                    session.query(TradingDecision.strategy_id)
+                    .join(Execution, Execution.decision_id == TradingDecision.id)
+                    .filter(Execution.id == position.execution_id)
+                    .first()
+                )
+                if result and result[0]:
+                    strategy_id = result[0]
+                    expected = self.strategy_holding_times.get(strategy_id)
+                    if expected:
+                        return expected * self.holding_time_multiplier
+        except Exception:
+            pass
+        return self.max_holding_time_seconds
+
+    def _check_partial_exit(self, position: PnLLedger, current_price: float, session):
+        """
+        Partial exit: close 50% at 0.5x TP distance, move SL to breakeven.
+        Only applies to positions with Binance-side orders (live mode).
+        """
+        pos_id = position.id
+
+        if pos_id not in self.partial_exits:
+            self.partial_exits[pos_id] = {"partial_done": False, "time_trim_done": False}
+
+        state = self.partial_exits[pos_id]
+        if state["partial_done"]:
+            return
+
+        is_long = position.side == "LONG"
+        entry_price = position.entry_price
+
+        # Get the original TP to determine 50% distance
+        tp_price = None
+        try:
+            initial_tp = self._get_initial_tp(position, is_long, session)
+            if initial_tp:
+                tp_price = initial_tp
+        except Exception:
+            pass
+
+        if not tp_price:
+            return
+
+        tp_distance = abs(tp_price - entry_price)
+        half_tp_distance = tp_distance * 0.5
+
+        # Check if price reached 50% of TP distance
+        if is_long:
+            profit_distance = current_price - entry_price
+        else:
+            profit_distance = entry_price - current_price
+
+        if profit_distance < half_tp_distance:
+            return
+
+        # Close 50% of position
+        half_qty = self._round_quantity(position.symbol, position.quantity * 0.5)
+        if half_qty <= 0:
+            return
+
+        close_side = "SELL" if is_long else "BUY"
+
+        if self.execution_mode != "paper":
+            try:
+                self.binance_client.create_order(
+                    symbol=position.symbol,
+                    side=close_side,
+                    order_type="MARKET",
+                    quantity=half_qty,
+                    reduce_only=True,
+                )
+
+                # Move SL to breakeven
+                self._replace_sl_order(position, entry_price, session)
+
+                state["partial_done"] = True
+                logger.info(
+                    "Partial exit: closed 50%, SL moved to breakeven",
+                    position_id=pos_id,
+                    symbol=position.symbol,
+                    closed_qty=half_qty,
+                    at_price=current_price,
+                    profit_distance=f"{profit_distance:.4f}",
+                )
+            except Exception as e:
+                error_str = str(e)
+                if "-2022" in error_str:
+                    state["partial_done"] = True  # Position gone
+                else:
+                    logger.warning("Partial exit failed", position_id=pos_id, error=error_str)
+        else:
+            # Paper mode: just track it
+            state["partial_done"] = True
+            logger.info(
+                "Partial exit (paper): would close 50%",
+                position_id=pos_id,
+                symbol=position.symbol,
+                at_price=current_price,
+            )
+
+    def _check_time_based_reduction(self, position: PnLLedger, current_price: float, session):
+        """
+        Time-based reduction: after 50% of max holding time, if not in profit, close 25%.
+        Trims losers early to reduce average loss.
+        """
+        pos_id = position.id
+
+        if pos_id not in self.partial_exits:
+            self.partial_exits[pos_id] = {"partial_done": False, "time_trim_done": False}
+
+        state = self.partial_exits[pos_id]
+        if state["time_trim_done"]:
+            return
+
+        max_hold = self._get_strategy_max_holding(position, session)
+        holding_seconds = (datetime.utcnow() - position.entry_time).total_seconds()
+
+        if holding_seconds < max_hold * 0.5:
+            return  # Not at 50% of max time yet
+
+        # Check if position is NOT in profit
+        is_long = position.side == "LONG"
+        if is_long:
+            in_profit = current_price > position.entry_price
+        else:
+            in_profit = current_price < position.entry_price
+
+        if in_profit:
+            return  # In profit, don't trim
+
+        # Close 25% of position
+        trim_qty = self._round_quantity(position.symbol, position.quantity * 0.25)
+        if trim_qty <= 0:
+            return
+
+        close_side = "SELL" if is_long else "BUY"
+
+        if self.execution_mode != "paper":
+            try:
+                self.binance_client.create_order(
+                    symbol=position.symbol,
+                    side=close_side,
+                    order_type="MARKET",
+                    quantity=trim_qty,
+                    reduce_only=True,
+                )
+                state["time_trim_done"] = True
+                logger.info(
+                    "Time-based reduction: trimmed 25% of losing position",
+                    position_id=pos_id,
+                    symbol=position.symbol,
+                    trimmed_qty=trim_qty,
+                    holding_seconds=int(holding_seconds),
+                    max_hold=max_hold,
+                )
+            except Exception as e:
+                error_str = str(e)
+                if "-2022" in error_str:
+                    state["time_trim_done"] = True  # Position gone
+                else:
+                    logger.warning("Time-based reduction failed", position_id=pos_id, error=error_str)
+        else:
+            state["time_trim_done"] = True
+            logger.info(
+                "Time-based reduction (paper): would trim 25%",
+                position_id=pos_id,
+                symbol=position.symbol,
+                holding_seconds=int(holding_seconds),
+            )
+
     # ========== SHARED HELPERS ==========
 
     def _get_hard_stop(self, position: PnLLedger, session) -> Optional[float]:
@@ -1061,6 +1269,7 @@ class TrailingStopMonitor:
         # Clean up tracking state
         self.position_levels.pop(position.id, None)
         self.sl_states.pop(position.id, None)
+        self.partial_exits.pop(position.id, None)
 
     def _close_position(self, position: PnLLedger, current_price: float, reason: str, session):
         """Close a legacy position via Binance API (or paper) and update PnLLedger."""

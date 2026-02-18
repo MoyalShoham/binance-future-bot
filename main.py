@@ -268,8 +268,8 @@ def main():
     parser.add_argument(
         "--interval",
         type=int,
-        default=60,
-        help="Interval between cycles in seconds (for continuous mode)"
+        default=120,
+        help="Interval between cycles in seconds (default: 120s to reduce overtrading)"
     )
 
     args = parser.parse_args()

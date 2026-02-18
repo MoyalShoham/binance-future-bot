@@ -12,7 +12,7 @@ trading:
   scalping:
     enabled: true
     min_profit_target_pct: 0.003  # 0.3% minimum profit target
-    max_holding_time_seconds: 600  # 10 minutes max
+    max_holding_time_seconds: 900  # 15 minutes max (give wider TP targets time to hit)
     timeframes: ["1m", "5m", "15m"]
 
   # Fallback symbols (used when scanner is disabled or fails)
@@ -30,10 +30,10 @@ trading:
 symbol_scanner:
   enabled: true
   min_volume_usdt: 200000000      # Min 24h volume $200M (stricter liquidity filter, was $100M)
-  top_n: 8                        # Pick top 8 movers (fewer, higher quality)
+  top_n: 4                        # Pick top 4 movers ($125 can't trade 8 symbols)
   min_price_change_pct: 1.5       # Min 1.5% 24h change (momentum filter)
   max_price_change_pct: 15.0      # Max 15% - skip pump-and-dump memecoins (was 30%)
-  always_include: ["BTCUSDT", "ETHUSDT", "SOLUSDT"]  # Blue-chips: tight spreads, low funding, deep books
+  always_include: ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]  # Blue-chips: tight spreads, low funding, deep books
 
   # External sources (merged with Binance movers, multi-source symbols get boosted)
   use_coingecko: true             # CoinGecko trending coins (free, no key needed)
@@ -43,8 +43,8 @@ symbol_scanner:
 # Risk Management
 risk:
   # Position sizing limits
-  max_risk_per_trade_pct: 0.03  # 3% of account per trade (conservative)
-  max_daily_drawdown_pct: 0.60  # 7.5% daily drawdown limit (~$15 on $200)
+  max_risk_per_trade_pct: 0.01  # 1% of account per trade ($1.25 on $125)
+  max_daily_drawdown_pct: 0.60  # 60% daily drawdown limit (user preference)
   max_portfolio_exposure_pct: 0.55  # 55% max capital deployed
   max_position_concentration_pct: 0.25  # Single position max 25%
 
@@ -73,9 +73,9 @@ risk:
   volatility_gate_threshold_pct: 0.05  # Block trades if volatility > 5%
 
   # SL/TP distance multipliers (ATR-based)
-  sl_atr_multiplier: 1.0       # SL = 1.0 ATR (typically 0.15-0.4% on BTC 5m)
-  tp_atr_multiplier: 1.5       # TP = 1.5 ATR — achievable within max holding time
-  min_rr_ratio: 1.5            # Enforce minimum R:R (was 2.0 — unreachable for scalping)
+  sl_atr_multiplier: 0.8       # SL = 0.8 ATR (tighter stops, less loss per trade)
+  tp_atr_multiplier: 2.0       # TP = 2.0 ATR — wider targets for better R:R
+  min_rr_ratio: 2.5            # Enforce 2.5:1 R:R (positive EV at 40% win rate)
   min_sl_distance_pct: 0.004   # 0.4% floor to prevent too-tight stops
   leverage_based_tp: false     # Disabled: 2.5% TP unreachable in 10min. Using ATR-based instead
 
@@ -169,7 +169,7 @@ execution:
     taker_bps: 5  # 0.05% taker fee
     pre_trade_fee_filter:
       enabled: true
-      fee_buffer_multiplier: 1.5  # Expected profit must be >= 1.5x round-trip fees
+      fee_buffer_multiplier: 3.0  # Expected profit must be >= 3x round-trip fees (was 1.5x — barely above breakeven)
 
   # Hybrid mode settings
   hybrid:
@@ -232,10 +232,10 @@ reporting:
 # Strategies
 strategies:
   enabled:
-    - "ema_crossover_scalp"    # Re-enabled: now has trend strength filter (ATR-normalized EMA spread)
-    - "vwap_bounce_scalp"      # Widened: 0.5% zone + volume confirmation + graduated confidence
-    - "rsi_pullback_scalp"     # NEW: buy oversold dips in uptrends, sell overbought in downtrends
-    - "bollinger_squeeze_scalp" # NEW: Bollinger Band squeeze breakout
+    - "ema_crossover_scalp"    # Trend-following: EMA crossover with convergence pre-signal
+    - "rsi_pullback_scalp"     # Mean reversion in trend: buy dips/sell rallies
+    - "vwap_bounce_scalp"      # Mean reversion: VWAP cross with volume confirmation
+    - "bollinger_squeeze_scalp" # Volatility breakout: squeeze then expansion
     # orderbook_imbalance_scalp: DISABLED — noise-based signals, no edge
     # momentum_breakout_scalp: DISABLED — needs stronger trend regime filter
 
@@ -310,14 +310,14 @@ trailing_stop:
   hard_stop_fallback_pct: 0.02  # 2%
 
   # Time-based exit (safety net)
-  max_holding_time_seconds: 600  # 10 minutes
+  max_holding_time_seconds: 900  # 15 minutes (match scalping config)
 
   # Dynamic SL adjustment (move SL to breakeven, then trail)
   dynamic_sl:
     enabled: true
-    breakeven_move_pct: 0.006    # Move SL to breakeven at 0.6% profit (> SL floor)
-    trail_activation_pct: 0.012  # Start trailing at 1.2% profit
-    trail_step_pct: 0.004        # SL trails 0.4% behind price
+    breakeven_move_pct: 0.004    # Move SL to breakeven at 0.4% profit (lock in earlier)
+    trail_activation_pct: 0.008  # Start trailing at 0.8% profit (was 1.2%)
+    trail_step_pct: 0.003        # SL trails 0.3% behind price (tighter trail)
     min_move_pct: 0.001          # Only move SL if change > 0.1%
 
   # Dynamic TP/SL recalculation (ATR-based, replaces Binance-side orders)

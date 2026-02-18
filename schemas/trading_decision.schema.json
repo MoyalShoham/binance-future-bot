@@ -181,6 +181,45 @@
     "research_summary_hash": {
       "type": "string",
       "description": "SHA-256 hash of the research summary input (for audit trail)"
+    },
+    "confluence": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "properties": {
+            "score": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 5,
+              "description": "Number of confluence factors met (0-5)"
+            },
+            "tier": {
+              "type": "string",
+              "enum": ["Q0", "Q1", "Q2", "Q3", "Q4", "Q5"],
+              "description": "Quality tier based on confluence score"
+            },
+            "factors": {
+              "type": "object",
+              "properties": {
+                "trend": {"type": "boolean"},
+                "momentum": {"type": "boolean"},
+                "trend_strength": {"type": "boolean"},
+                "volume": {"type": "boolean"},
+                "structure": {"type": "boolean"}
+              },
+              "description": "Which confluence factors passed"
+            },
+            "size_multiplier": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 2,
+              "description": "Position size multiplier based on confluence tier"
+            }
+          }
+        }
+      ],
+      "description": "Confluence scoring data (null for NO_TRADE)"
     }
   }
 }
