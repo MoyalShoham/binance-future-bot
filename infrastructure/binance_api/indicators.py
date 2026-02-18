@@ -22,7 +22,8 @@ class TechnicalIndicators:
     def calculate_all(
         self,
         klines: List[Dict[str, Any]],
-        current_price: float
+        current_price: float,
+        reference_time: datetime = None
     ) -> Dict[str, Any]:
         """
         Calculate all technical indicators.
@@ -30,6 +31,8 @@ class TechnicalIndicators:
         Args:
             klines: List of OHLCV dicts from Binance
             current_price: Current market price
+            reference_time: Reference datetime for VWAP daily reset (default: now UTC).
+                            Pass candle timestamp when backtesting historical data.
 
         Returns:
             Dict of all calculated indicators
@@ -55,11 +58,11 @@ class TechnicalIndicators:
         indicators["ema_50"] = round(ta.trend.ema_indicator(df["Close"], window=50).iloc[-1], 2)
 
         # VWAP — reset daily at 00:00 UTC (institutional standard)
-        # Filter klines to only current UTC day, then compute cumulative VWAP
+        # Filter klines to only reference day, then compute cumulative VWAP
         if "timestamp" in df.columns:
             df["_dt"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-            today_utc = datetime.now(timezone.utc).date()
-            today_mask = df["_dt"].dt.date == today_utc
+            ref_date = (reference_time or datetime.now(timezone.utc)).date()
+            today_mask = df["_dt"].dt.date == ref_date
             if today_mask.any():
                 day_df = df.loc[today_mask]
             else:
@@ -106,6 +109,15 @@ class TechnicalIndicators:
             "pct_b": round(float(bb_pct_b), 4),
             "prev_bandwidth": round(float(prev_bb_bandwidth), 4),
         }
+
+        # ADX (Average Directional Index) — trend strength, independent of RSI/EMA
+        adx_indicator = ta.trend.ADXIndicator(df["High"], df["Low"], df["Close"], window=14)
+        indicators["adx"] = round(float(adx_indicator.adx().iloc[-1]), 2)
+        indicators["adx_pos"] = round(float(adx_indicator.adx_pos().iloc[-1]), 2)
+        indicators["adx_neg"] = round(float(adx_indicator.adx_neg().iloc[-1]), 2)
+
+        # Support/Resistance levels (pivot-based)
+        indicators["support_resistance"] = self.calculate_support_resistance(klines)
 
         # ATR (Average True Range) - use 6 decimal places to avoid rounding to 0 for low-price coins
         indicators["atr"] = round(ta.volatility.average_true_range(

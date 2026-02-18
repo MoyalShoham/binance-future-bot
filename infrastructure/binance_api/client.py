@@ -134,7 +134,9 @@ class BinanceFuturesClient:
         self,
         symbol: str,
         interval: str,
-        limit: int = 100
+        limit: int = 100,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None
     ) -> List[Dict[str, Any]]:
         """
         Get candlestick data (OHLCV).
@@ -143,16 +145,19 @@ class BinanceFuturesClient:
             symbol: Trading symbol
             interval: Interval (1m, 5m, 15m, 1h, etc.)
             limit: Number of candles (max 1500)
+            start_time: Start timestamp in milliseconds (optional)
+            end_time: End timestamp in milliseconds (optional)
 
         Returns:
             List of OHLCV dicts
         """
         try:
-            klines = self.client.futures_klines(
-                symbol=symbol,
-                interval=interval,
-                limit=limit
-            )
+            params = dict(symbol=symbol, interval=interval, limit=limit)
+            if start_time is not None:
+                params["startTime"] = start_time
+            if end_time is not None:
+                params["endTime"] = end_time
+            klines = self.client.futures_klines(**params)
 
             # Parse klines
             parsed_klines = []

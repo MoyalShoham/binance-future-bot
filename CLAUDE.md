@@ -39,6 +39,12 @@ Background threads:
 # Run live trading (all symbols, dynamic scanner)
 & '.\.conda\python.exe' main.py --mode live --symbol all --continuous --interval 5
 
+# Run backtest
+& '.\.conda\python.exe' scripts/run_backtest.py --symbol BTCUSDT --start 2025-12-01 --end 2026-02-01 --interval 5m
+
+# Run walk-forward validation
+& '.\.conda\python.exe' scripts/run_backtest.py --symbol BTCUSDT --start 2025-08-01 --end 2026-02-01 --walk-forward
+
 # Compile check all Python files
 & '.\.conda\python.exe' -m py_compile main.py
 
@@ -107,10 +113,35 @@ binance-future-bot/
 │   └── state_manager.py                # Pipeline state tracking
 ├── schemas/                             # JSON schema validation
 ├── docs/                                # Reference documentation
+├── backtesting/
+│   ├── __init__.py                      # Package exports
+│   ├── data_loader.py                   # Historical kline downloader + parquet cache
+│   ├── engine.py                        # Bar-by-bar backtest with TP/SL/trailing
+│   └── metrics.py                       # Sharpe, Sortino, profit factor, etc.
+├── scripts/
+│   └── run_backtest.py                  # CLI backtest runner
 ├── tests/                               # Unit + integration tests
-├── data/                                # SQLite databases
+├── data/                                # SQLite databases + historical parquet
 └── logs/                                # Rotating log files
 ```
+
+## Backtesting
+
+The backtesting module (`backtesting/`, `scripts/run_backtest.py`) reuses live system components (indicators, strategy logic) to simulate historical trading.
+
+### How It Works
+- **Data Loader** downloads klines from Binance with pagination, caches as parquet in `data/historical/`
+- **Engine** walks bar-by-bar, computes indicators via `TechnicalIndicators.calculate_all()`, evaluates strategies, simulates fills at next candle open with slippage/fees
+- **HTF Trend** resampled from base candles (e.g. 5m→1h via 12x factor), EMA 9/21/50 alignment classified as bullish/weak_bullish/bearish/weak_bearish/neutral
+- **Confluence Gate** mirrors live system's 5-factor scoring (trend, momentum, ADX, volume, structure). Rejects score ≤ 1, scales position size by tier
+- **Walk-Forward Validation** trains on N days, tests on next M days, steps forward — only OOS results count
+
+### Known Backtest Limitations (by design)
+- Order book imbalance always 0 (no historical orderbook data)
+- No learning adjustments (backtest is pre-learning baseline)
+- EMA convergence pre-signal absent
+- Strategy base confidence hardcoded (0.72/0.75) vs adaptive in live
+- Market regime always DEFAULT (no LLM classification in backtest)
 
 ## Known Gotchas
 
@@ -126,22 +157,28 @@ These bugs have been encountered and fixed. Be aware of them when modifying code
 8. **DatabaseSession** - No `.execute()` method. Use `session_scope()` context manager.
 9. **Stale positions** - DB positions can become stale if Binance closes them server-side. Orphan reconciliation handles this.
 10. **Learning death spirals** - Learning must use soft confidence penalties, not hard blocks. Limited data + hard blocks = bot stops trading entirely.
+11. **VWAP in backtest** - `calculate_all()` uses `reference_time` param for VWAP daily reset. Live callers omit it (defaults to `datetime.now()`). Backtest must pass candle timestamp or VWAP falls back to rolling window.
+12. **get_klines() for historical data** - Use `start_time`/`end_time` (ms) params for paginated downloads. Live callers use only `limit` param.
 
 ## Risk Configuration (Current)
 
 | Parameter | Value |
 |-----------|-------|
-| Max risk per trade | 3% |
-| Max daily drawdown | 8.5% |
+| Max risk per trade | 1% |
+| Max daily drawdown | 6% |
 | Max portfolio exposure | 55% |
 | Max concentration/symbol | 25% |
 | Max concurrent positions | 3 |
 | Default leverage | 5x |
-| Min R:R ratio | 2.0:1 |
-| Min SL distance | 0.5% |
-| Fee filter | 1.5x round-trip fees |
+| Min R:R ratio | 2.5:1 |
+| Min SL distance | 0.4% |
+| Fee filter | 3.0x round-trip fees |
 | Funding rate limit | 0.05% |
 | Consecutive loss cooldown | 3 losses in 30min -> 15min pause |
+| Min confidence | 70% |
+| Confluence gate | 3+ of 5 factors required |
+| Scanner top_n | 4 symbols |
+| Max holding time | 15 min |
 
 ## Documentation
 
