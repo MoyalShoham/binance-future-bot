@@ -164,12 +164,14 @@ These bugs have been encountered and fixed. Be aware of them when modifying code
 
 | Parameter | Value |
 |-----------|-------|
-| Max risk per trade | 1% |
-| Max daily drawdown | 6% |
-| Max portfolio exposure | 55% |
+| Max risk per trade | 2% |
+| Max daily drawdown | 60% |
+| Max portfolio exposure | 75% |
 | Max concentration/symbol | 25% |
 | Max concurrent positions | 3 |
-| Default leverage | 5x |
+| Default leverage | 15x (range: 10-15x) |
+| Min position size | 15% of equity (margin) |
+| Max position size | 25% of equity (margin) |
 | Min R:R ratio | 2.5:1 |
 | Min SL distance | 0.4% |
 | Fee filter | 3.0x round-trip fees |

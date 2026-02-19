@@ -6,7 +6,7 @@ trading:
   execution_mode: "live"  # paper | live | hybrid
   testnet: false  # Use Binance mainnet for market data
   max_concurrent_positions: 3
-  default_leverage: 5
+  default_leverage: 15
 
   # Scalping configuration
   scalping:
@@ -43,9 +43,9 @@ symbol_scanner:
 # Risk Management
 risk:
   # Position sizing limits
-  max_risk_per_trade_pct: 0.01  # 1% of account per trade ($1.25 on $125)
+  max_risk_per_trade_pct: 0.02  # 2% of account per trade ($2.50 on $125)
   max_daily_drawdown_pct: 0.60  # 60% daily drawdown limit (user preference)
-  max_portfolio_exposure_pct: 0.55  # 55% max capital deployed
+  max_portfolio_exposure_pct: 0.75  # 75% max capital deployed (3 positions × 25%)
   max_position_concentration_pct: 0.25  # Single position max 25%
 
   # Funding rate filter (block trades that pay high funding)
@@ -62,9 +62,9 @@ risk:
 
   # Leverage limits
   leverage_limits:
-    low_volatility: 5     # < 2% volatility
-    medium_volatility: 5   # 2-5% volatility
-    high_volatility: 5     # > 5% volatility
+    low_volatility: 15     # < 2% volatility
+    medium_volatility: 15   # 2-5% volatility
+    high_volatility: 15     # > 5% volatility
 
   # Correlation limits
   max_correlated_positions: 3  # Max positions with correlation > 0.7
@@ -73,15 +73,17 @@ risk:
   volatility_gate_threshold_pct: 0.05  # Block trades if volatility > 5%
 
   # SL/TP distance multipliers (ATR-based)
-  sl_atr_multiplier: 0.8       # SL = 0.8 ATR (tighter stops, less loss per trade)
-  tp_atr_multiplier: 2.0       # TP = 2.0 ATR — wider targets for better R:R
-  min_rr_ratio: 2.5            # Enforce 2.5:1 R:R (positive EV at 40% win rate)
-  min_sl_distance_pct: 0.004   # 0.4% floor to prevent too-tight stops
+  sl_atr_multiplier: 1.2       # SL = 1.2 ATR (wider stops, give positions room to breathe)
+  tp_atr_multiplier: 2.5       # TP = 2.5 ATR — wider targets to maintain R:R with wider SL
+  min_rr_ratio: 2.0            # Enforce 2.0:1 R:R (positive EV at 40% win rate)
+  min_sl_distance_pct: 0.006   # 0.6% floor to prevent too-tight stops
   leverage_based_tp: false     # Disabled: 2.5% TP unreachable in 10min. Using ATR-based instead
 
   # Position sizing method
   position_sizing:
-    method: "kelly_criterion"  # kelly_criterion | fixed_percentage | atr_based
+    method: "fixed_percentage"  # kelly_criterion | fixed_percentage | atr_based
+    min_position_pct: 0.20  # 20% fixed allocation per position (margin)
+    max_position_pct: 0.20  # 20% fixed allocation per position (margin)
     kelly_fraction: 0.5  # Half Kelly for safety
     atr_multiplier: 2.0  # For ATR-based stop loss
 
@@ -300,7 +302,7 @@ trailing_stop:
 
   # TP/SL percentages (applied from current price at each ratchet)
   tp_pct: 0.005        # 0.5% — take profit trigger (ratchets, doesn't close)
-  sl_pct: 0.005        # 0.5% — stop loss trigger (CLOSES position)
+  sl_pct: 0.007        # 0.7% — stop loss trigger (CLOSES position)
 
   # Hard stop: use initial SL from TradingDecision (1.5 ATR-based)
   # After first TP hit and ratchet, switches to sl_pct for subsequent SL levels
@@ -326,7 +328,7 @@ trailing_stop:
     recalc_threshold_pct: 0.004   # Recalculate when price moves 0.4% from last calc
     use_current_atr: true
     tp_atr_multiplier: 2.0        # TP = current_price +/- ATR * mult
-    sl_atr_multiplier: 1.0        # SL = current_price -/+ ATR * mult
+    sl_atr_multiplier: 1.5        # SL = current_price -/+ ATR * mult
     min_rr_ratio: 1.5
     max_recalcs: 10
     tp_proximity_trigger_pct: 0.20  # Recalc when within 20% of remaining TP distance

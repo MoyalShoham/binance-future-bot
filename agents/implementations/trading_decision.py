@@ -267,6 +267,13 @@ class TradingDecisionAgent(BaseAgent):
             if confluence and confluence.get("size_multiplier", 1.0) != 1.0:
                 position_size_usdt = round(position_size_usdt * confluence["size_multiplier"], 2)
 
+            # Re-enforce min position size after multipliers
+            sizing_cfg = self.config.get("risk", {}).get("position_sizing", {})
+            min_pct = sizing_cfg.get("min_position_pct", 0.15)
+            equity = getattr(self, '_last_assumed_equity', 100.0)
+            min_notional = equity * min_pct * self.default_leverage
+            position_size_usdt = max(position_size_usdt, max(min_notional, 100.0))
+
             # Fee viability check: reject trades where expected profit < fees * buffer
             if decision != "NO_TRADE" and self.fee_filter_enabled:
                 fee_viable, fee_reason = self._check_fee_viability(
@@ -1205,31 +1212,30 @@ class TradingDecisionAgent(BaseAgent):
                 "paper_trading", {}
             ).get("simulated_balance_usdt", 100)
 
-        # Risk per trade from config
-        risk_pct = self.config.get("risk", {}).get("max_risk_per_trade_pct", 0.10)
-        risk_amount = assumed_equity * risk_pct
+        # Store for use after multipliers are applied
+        self._last_assumed_equity = assumed_equity
 
-        # Calculate position size based on stop distance
         if entry_price <= 0:
             return 0.0
-        stop_distance_pct = abs((entry_price - stop_loss) / entry_price)
 
-        if stop_distance_pct > 0:
-            position_size = risk_amount / stop_distance_pct
-        else:
-            position_size = assumed_equity * 0.5  # Default: 50% of equity
-
-        # Cap position size per-position (allow room for multiple concurrent positions)
+        # Position sizing: allocate a percentage of equity as margin
         leverage = self.default_leverage
-        max_concurrent = self.config.get("trading", {}).get("max_concurrent_positions", 3)
-        max_exposure_pct = self.config.get("risk", {}).get("max_portfolio_exposure_pct", 0.55)
-        per_position_pct = max_exposure_pct / max_concurrent
-        max_notional = assumed_equity * per_position_pct * leverage
-        position_size = min(position_size, max_notional)
+        sizing_config = self.config.get("risk", {}).get("position_sizing", {})
+        min_pct = sizing_config.get("min_position_pct", 0.15)
+        max_pct = sizing_config.get("max_position_pct", 0.25)
+
+        # Use midpoint as base allocation (confluence/regime multipliers adjust later)
+        target_pct = (min_pct + max_pct) / 2  # 20%
+        margin = assumed_equity * target_pct
+        position_size = margin * leverage  # notional = margin * leverage
+
+        # Clamp to configured min/max
+        min_notional = assumed_equity * min_pct * leverage
+        max_notional = assumed_equity * max_pct * leverage
+        position_size = max(min_notional, min(position_size, max_notional))
 
         # Enforce Binance Futures minimum notional ($100)
-        min_notional = 100.0
-        position_size = max(position_size, min_notional)
+        position_size = max(position_size, 100.0)
 
         return round(position_size, 2)
 

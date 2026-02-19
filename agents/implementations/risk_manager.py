@@ -89,6 +89,8 @@ class RiskManagerAgent(BaseAgent):
         self.sizing_method = sizing_config.get("method", "kelly_criterion")
         self.kelly_fraction = sizing_config.get("kelly_fraction", 0.5)
         self.atr_multiplier = sizing_config.get("atr_multiplier", 2.0)
+        self.min_position_pct = sizing_config.get("min_position_pct", 0.15)
+        self.max_position_pct = sizing_config.get("max_position_pct", 0.25)
 
         # Kill switches
         kill_switches = risk_config.get("kill_switches", {})
@@ -881,25 +883,30 @@ class RiskManagerAgent(BaseAgent):
         trading_decision: Dict[str, Any],
         account_status: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Fixed percentage position sizing."""
+        """Fixed percentage position sizing — allocate min_position_pct to max_position_pct of equity as margin."""
 
         total_equity = max(account_status.get("total_equity", 1), 0.01)
-        risk_amount = total_equity * self.max_risk_per_trade_pct
+        leverage = trading_decision.get("leverage", self.config.get("trading", {}).get("default_leverage", 15))
+
+        # Use midpoint of min/max as target allocation
+        target_pct = (self.min_position_pct + self.max_position_pct) / 2
+        margin = total_equity * target_pct
+        position_size_usdt = margin * leverage
+
+        # Clamp to configured bounds
+        min_notional = total_equity * self.min_position_pct * leverage
+        max_notional = total_equity * self.max_position_pct * leverage
+        position_size_usdt = max(min_notional, min(position_size_usdt, max_notional))
 
         entry_price = trading_decision.get("entry_price", 0)
         stop_loss = trading_decision.get("stop_loss", 0)
-
-        if entry_price > 0 and stop_loss > 0:
-            stop_distance_pct = abs((entry_price - stop_loss) / entry_price)
-            position_size_usdt = risk_amount / stop_distance_pct if stop_distance_pct > 0 else 0
-        else:
-            position_size_usdt = 0
-            stop_distance_pct = 0
+        stop_distance_pct = abs((entry_price - stop_loss) / entry_price) if entry_price > 0 and stop_loss > 0 else 0
 
         return {
             "method": "fixed_percentage",
-            "risk_per_trade_usdt": risk_amount,
-            "risk_per_trade_pct": self.max_risk_per_trade_pct,
+            "target_margin_pct": target_pct,
+            "min_margin_pct": self.min_position_pct,
+            "max_margin_pct": self.max_position_pct,
             "calculated_position_size_usdt": position_size_usdt,
             "stop_loss_distance_pct": stop_distance_pct
         }
@@ -1010,10 +1017,11 @@ class RiskManagerAgent(BaseAgent):
         if final_size > max_notional and max_notional > 0:
             modified_params["position_size_usdt"] = round(max_notional, 2)
 
-        # Enforce Binance Futures minimum notional ($100)
+        # Enforce minimum position size: max(15% of equity * leverage, $100)
         final_size = modified_params.get("position_size_usdt", requested_size)
-        if final_size < 100.0:
-            modified_params["position_size_usdt"] = 100.0
+        min_notional = max(total_equity * self.min_position_pct * leverage, 100.0)
+        if final_size < min_notional:
+            modified_params["position_size_usdt"] = round(min_notional, 2)
 
         return modified_params
 
