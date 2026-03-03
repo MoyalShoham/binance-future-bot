@@ -46,12 +46,13 @@ class TrailingStopMonitor:
     - When SL hit, position closes
     """
 
-    def __init__(self, binance_client, db_session: DatabaseSession, config: Dict[str, Any], trades_db=None, ws_manager=None):
+    def __init__(self, binance_client, db_session: DatabaseSession, config: Dict[str, Any], trades_db=None, ws_manager=None, paper_dashboard=None):
         self.binance_client = binance_client
         self.db_session = db_session
         self.config = config
         self.trades_db = trades_db
         self.ws_manager = ws_manager
+        self.paper_dashboard = paper_dashboard
 
         # Trailing stop config
         ts_config = config.get("trailing_stop", {})
@@ -251,7 +252,12 @@ class TrailingStopMonitor:
             self._handle_sl_tp_triggered(position, session)
             return
 
-        # Position still open on Binance — check time-based exit
+        # Paper mode: check SL/TP by price comparison (no Binance-side orders)
+        if self.execution_mode == "paper":
+            if self._check_paper_sl_tp(position, session):
+                return
+
+        # Position still open — check time-based exit
         # Use strategy-specific max holding time (3x expected)
         max_hold = self._get_strategy_max_holding(position, session)
         holding_seconds = (datetime.utcnow() - position.entry_time).total_seconds()
@@ -273,13 +279,71 @@ class TrailingStopMonitor:
         if current_price:
             self._check_time_based_reduction(position, current_price, session)
 
-        # Dynamic SL adjustment (breakeven + trail)
-        if self.dynamic_sl_enabled and position.sl_order_id and self.execution_mode != "paper":
+        # Dynamic SL adjustment (breakeven + trail) — works in both paper and live
+        if self.dynamic_sl_enabled and position.sl_order_id:
             self._adjust_dynamic_sl(position, session)
 
-        # Dynamic TP/SL recalculation (ATR-based, both SL and TP)
-        if self.dtp_enabled and position.sl_order_id and position.tp_order_id:
-            self._adjust_dynamic_tp_sl(position, session)
+        # Dynamic TP/SL recalculation: DISABLED — moving goalpost bug (TP proximity extends TP further)
+        # Deleted _adjust_dynamic_tp_sl() method entirely
+
+    def _check_paper_sl_tp(self, position: PnLLedger, session) -> bool:
+        """Check SL/TP for paper-mode positions by price comparison.
+
+        Looks up the original TradingDecision SL/TP levels and compares against
+        current price. Also checks dynamic SL state for trailing stop updates.
+        Returns True if position was closed (SL or TP hit).
+        """
+        try:
+            current_price = self._get_current_price(position.symbol)
+        except Exception:
+            return False
+
+        is_long = position.side == "LONG"
+
+        # Get original SL/TP from TradingDecision
+        sl_price = None
+        tp_price = None
+        try:
+            result = (
+                session.query(TradingDecision.stop_loss, TradingDecision.take_profit_levels)
+                .join(Execution, Execution.decision_id == TradingDecision.id)
+                .filter(Execution.id == position.execution_id)
+                .first()
+            )
+            if result:
+                sl_price = result[0]
+                tp_levels = result[1]
+                if isinstance(tp_levels, list) and len(tp_levels) > 0:
+                    tp_price = tp_levels[0].get("price", 0)
+        except Exception as e:
+            logger.warning("Failed to get paper SL/TP from decision", error=str(e))
+
+        # Override SL with dynamic SL if it has been adjusted (trailing stop)
+        pos_id = position.id
+        if pos_id in self.sl_states:
+            dynamic_sl = self.sl_states[pos_id].get("current_sl", 0)
+            if dynamic_sl > 0:
+                sl_price = dynamic_sl
+
+        # Check TP hit
+        if tp_price and tp_price > 0:
+            if is_long and current_price >= tp_price:
+                self._close_position(position, current_price, "TAKE_PROFIT", session)
+                return True
+            elif not is_long and current_price <= tp_price:
+                self._close_position(position, current_price, "TAKE_PROFIT", session)
+                return True
+
+        # Check SL hit
+        if sl_price and sl_price > 0:
+            if is_long and current_price <= sl_price:
+                self._close_position(position, current_price, "STOP_LOSS", session)
+                return True
+            elif not is_long and current_price >= sl_price:
+                self._close_position(position, current_price, "STOP_LOSS", session)
+                return True
+
+        return False
 
     def _handle_sl_tp_triggered(self, position: PnLLedger, session):
         """Position is gone from Binance — use recent trades for accurate fill data."""
@@ -563,8 +627,20 @@ class TrailingStopMonitor:
                 if move_pct < self.dsl_min_move_pct:
                     return  # Move too small, skip
 
-            self._replace_sl_order(position, new_sl, session)
-            state["current_sl"] = new_sl
+            if self.execution_mode == "paper":
+                # Paper mode: update in-memory state only, no Binance API calls
+                new_sl = self._round_price(position.symbol, new_sl)
+                state["current_sl"] = new_sl
+                logger.info(
+                    "Paper SL adjusted",
+                    symbol=position.symbol,
+                    side=position.side,
+                    new_sl=new_sl,
+                    stage=state["stage"],
+                )
+            else:
+                self._replace_sl_order(position, new_sl, session)
+                state["current_sl"] = new_sl
 
     def _round_price(self, symbol: str, price: float) -> float:
         """Round price to symbol's price precision."""
@@ -626,153 +702,6 @@ class TrailingStopMonitor:
 
     # ========== DYNAMIC TP/SL RECALCULATION ==========
 
-    def _adjust_dynamic_tp_sl(self, position: PnLLedger, session):
-        """Recalculate both SL and TP using fresh ATR when price moves significantly.
-
-        Triggered when price moves >= recalc_threshold_pct from last recalc price.
-        Fetches current ATR (20 candles of 5m klines), computes new SL and TP.
-        SL only moves forward (tighter). TP can adjust. min R:R enforced.
-        """
-        pos_id = position.id
-        is_long = position.side == "LONG"
-
-        try:
-            current_price = self._get_current_price(position.symbol)
-        except Exception:
-            return
-
-        # Initialize recalc state if needed
-        if pos_id not in self.sl_states:
-            self.sl_states[pos_id] = {
-                "stage": "initial",
-                "current_sl": 0.0,
-            }
-        state = self.sl_states[pos_id]
-
-        if "last_recalc_price" not in state:
-            state["last_recalc_price"] = position.entry_price
-            state["recalc_count"] = 0
-            state["current_tp"] = 0.0
-
-        # Check if price moved enough to trigger recalculation
-        last_recalc = state["last_recalc_price"]
-        if last_recalc <= 0:
-            last_recalc = position.entry_price
-        price_move_pct = abs(current_price - last_recalc) / last_recalc
-
-        # TP proximity trigger: recalc when within X% of remaining TP distance
-        tp_proximity_triggered = False
-        current_tp_val = state.get("current_tp", 0)
-        if current_tp_val > 0 and self.dtp_tp_proximity_trigger_pct > 0:
-            remaining_tp_dist = abs(current_tp_val - current_price)
-            total_tp_dist = abs(current_tp_val - position.entry_price)
-            if total_tp_dist > 0:
-                remaining_pct = remaining_tp_dist / total_tp_dist
-                if remaining_pct <= self.dtp_tp_proximity_trigger_pct:
-                    tp_proximity_triggered = True
-
-        if not tp_proximity_triggered and price_move_pct < self.dtp_recalc_threshold_pct:
-            return
-
-        # Check max recalcs
-        if state["recalc_count"] >= self.dtp_max_recalcs:
-            return
-
-        # Only recalculate when price is moving favorably
-        if is_long and current_price <= position.entry_price:
-            return
-        if not is_long and current_price >= position.entry_price:
-            return
-
-        # Fetch current ATR
-        atr = self._get_current_atr(position.symbol)
-        if atr is None or atr <= 0:
-            return
-
-        # Calculate new SL from ATR
-        if is_long:
-            new_sl = current_price - atr * self.dtp_sl_atr_mult
-        else:
-            new_sl = current_price + atr * self.dtp_sl_atr_mult
-
-        # Calculate new TP: leverage-based or ATR-based
-        leverage = getattr(position, 'leverage', self.default_leverage) or self.default_leverage
-        sl_dist = abs(current_price - new_sl)
-        if self.leverage_based_tp:
-            tp_dist = sl_dist * leverage
-        else:
-            tp_dist = atr * self.dtp_tp_atr_mult
-
-        if is_long:
-            new_tp = current_price + tp_dist
-        else:
-            new_tp = current_price - tp_dist
-
-        # Enforce SL only moves forward (tighter)
-        current_sl = state["current_sl"]
-        if current_sl > 0:
-            if is_long and new_sl < current_sl:
-                new_sl = current_sl  # Don't loosen SL for longs
-            elif not is_long and new_sl > current_sl:
-                new_sl = current_sl  # Don't loosen SL for shorts
-
-        # Enforce TP only extends further (never pull closer to entry)
-        current_tp_val = state.get("current_tp", 0)
-        if current_tp_val > 0:
-            if is_long and new_tp < current_tp_val:
-                new_tp = current_tp_val  # Don't pull TP closer for longs
-            elif not is_long and new_tp > current_tp_val:
-                new_tp = current_tp_val  # Don't pull TP closer for shorts
-
-        # Enforce minimum R:R ratio
-        sl_dist = abs(current_price - new_sl)
-        tp_dist = abs(new_tp - current_price)
-        if sl_dist > 0 and tp_dist / sl_dist < self.dtp_min_rr:
-            # Widen TP to maintain min R:R
-            if is_long:
-                new_tp = current_price + sl_dist * self.dtp_min_rr
-            else:
-                new_tp = current_price - sl_dist * self.dtp_min_rr
-
-        # Round prices
-        new_sl = self._round_price(position.symbol, new_sl)
-        new_tp = self._round_price(position.symbol, new_tp)
-
-        # Replace orders on Binance (live mode only)
-        sl_replaced = False
-        tp_replaced = False
-
-        if self.execution_mode != "paper":
-            if current_sl == 0 or new_sl != self._round_price(position.symbol, current_sl):
-                self._replace_sl_order(position, new_sl, session)
-                sl_replaced = True
-
-            current_tp_val = state.get("current_tp", 0)
-            if current_tp_val == 0 or new_tp != self._round_price(position.symbol, current_tp_val):
-                self._replace_tp_order(position, new_tp, session)
-                tp_replaced = True
-
-        # Update state
-        state["current_sl"] = new_sl
-        state["current_tp"] = new_tp
-        state["last_recalc_price"] = current_price
-        state["recalc_count"] += 1
-
-        logger.info(
-            "Dynamic TP/SL recalculated",
-            symbol=position.symbol,
-            side=position.side,
-            current_price=current_price,
-            new_sl=new_sl,
-            new_tp=new_tp,
-            atr=round(atr, 4),
-            leverage=leverage,
-            leverage_based_tp=self.leverage_based_tp,
-            tp_proximity_triggered=tp_proximity_triggered,
-            recalc_count=state["recalc_count"],
-            sl_replaced=sl_replaced,
-            tp_replaced=tp_replaced,
-        )
 
     def _get_current_atr(self, symbol: str) -> Optional[float]:
         """Fetch current ATR(14) from 20 candles of 5m klines. Lightweight ~100ms."""
@@ -907,11 +836,13 @@ class TrailingStopMonitor:
             self._close_position(position, current_price, "STOP_LOSS", session)
             return
 
-        # === 2. Check TP -> Ratchet ===
+        # === 2. Check TP -> Close position (no ratcheting) ===
         if is_long and current_price >= tp:
-            self._ratchet(pos_id, current_price, is_long, position.symbol)
+            self._close_position(position, current_price, "TAKE_PROFIT", session)
+            return
         elif not is_long and current_price <= tp:
-            self._ratchet(pos_id, current_price, is_long, position.symbol)
+            self._close_position(position, current_price, "TAKE_PROFIT", session)
+            return
 
         # === 3. Check time exit ===
         holding_seconds = (datetime.utcnow() - position.entry_time).total_seconds()
@@ -970,30 +901,6 @@ class TrailingStopMonitor:
         else:
             return price * (1 + self.sl_pct)
 
-    def _ratchet(self, pos_id: int, current_price: float, is_long: bool, symbol: str):
-        """Ratchet TP/SL levels from current price after TP hit."""
-        levels = self.position_levels[pos_id]
-        old_tp = levels["tp"]
-        old_sl = levels["sl"]
-
-        new_tp = self._calc_tp(current_price, is_long)
-        new_sl = self._calc_sl(current_price, is_long)
-
-        levels["tp"] = new_tp
-        levels["sl"] = new_sl
-        levels["ratchet_count"] += 1
-
-        logger.info(
-            "TP hit, ratcheting",
-            position_id=pos_id,
-            symbol=symbol,
-            ratchet=levels["ratchet_count"],
-            price=current_price,
-            old_tp=round(old_tp, 6),
-            new_tp=round(new_tp, 6),
-            old_sl=round(old_sl, 6),
-            new_sl=round(new_sl, 6),
-        )
 
     # ========== PARTIAL EXITS & TIME-BASED REDUCTION ==========
 
@@ -1249,6 +1156,20 @@ class TrailingStopMonitor:
                 )
             except Exception as e:
                 logger.warning("Failed to record trade close in trades_db", error=str(e))
+
+        # Record close in paper dashboard
+        if self.paper_dashboard and position.execution_id:
+            try:
+                self.paper_dashboard.record_trade_close(
+                    execution_id=position.execution_id,
+                    exit_price=exit_price,
+                    pnl_usdt=round(realized_pnl, 6),
+                    fees_usdt=round(total_fees, 6),
+                    holding_time_seconds=holding_seconds,
+                    close_reason=reason,
+                )
+            except Exception as e:
+                logger.warning("Failed to record trade close in paper_dashboard", error=str(e))
 
         # Include ratchet count in close log if available
         ratchet_count = self.position_levels.get(position.id, {}).get("ratchet_count", 0)

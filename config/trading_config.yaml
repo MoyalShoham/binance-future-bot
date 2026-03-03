@@ -5,8 +5,8 @@ trading:
   enabled: true
   execution_mode: "live"  # paper | live | hybrid
   testnet: false  # Use Binance mainnet for market data
-  max_concurrent_positions: 3
-  default_leverage: 15
+  max_concurrent_positions: 1
+  default_leverage: 10
 
   # Scalping configuration
   scalping:
@@ -14,6 +14,24 @@ trading:
     min_profit_target_pct: 0.003  # 0.3% minimum profit target
     max_holding_time_seconds: 900  # 15 minutes max (give wider TP targets time to hit)
     timeframes: ["1m", "5m", "15m"]
+
+  # Multi-timeframe analysis (top-down: 1h→15m→5m→1m)
+  multi_timeframe:
+    enabled: true
+    primary_timeframe: "5m"
+    timeframes:
+      - interval: "1h"
+        role: "macro_trend"
+        lookback: 100
+        weight: 0.45
+      - interval: "15m"
+        role: "intermediate_trend"
+        lookback: 100
+        weight: 0.35
+      - interval: "5m"
+        role: "entry_context"
+        lookback: 100
+        weight: 0.20
 
   # Fallback symbols (used when scanner is disabled or fails)
   symbols:
@@ -44,27 +62,29 @@ symbol_scanner:
 risk:
   # Position sizing limits
   max_risk_per_trade_pct: 0.02  # 2% of account per trade ($2.50 on $125)
-  max_daily_drawdown_pct: 0.60  # 60% daily drawdown limit (user preference)
-  max_portfolio_exposure_pct: 0.75  # 75% max capital deployed (3 positions × 25%)
-  max_position_concentration_pct: 0.25  # Single position max 25%
+  max_daily_drawdown_pct: 0.80  # 60% daily drawdown limit (user preference)
+  max_portfolio_exposure_pct: 0.55  # 55% max capital deployed (single position)
+  max_position_concentration_pct: 1.0  # Single coin, no concentration limit needed
 
   # Funding rate filter (block trades that pay high funding)
   max_funding_rate_pct: 0.0005  # 0.05% — block LONGs above this, SHORTs below -this
 
   # Consecutive loss cooldown
   consecutive_loss_cooldown:
-    max_losses: 3           # Max consecutive losses before cooldown
-    lookback_minutes: 30    # Window to count losses
-    cooldown_minutes: 15    # How long to pause trading on that symbol
+    max_losses: 3           # Max consecutive losses before symbol cooldown
+    lookback_minutes: 60    # Window to count losses (was 30min — too short)
+    cooldown_minutes: 45    # How long to pause trading on that symbol (was 15min)
+    global_kill_losses: 5   # 5 consecutive losses → global kill switch
+    global_kill_cooldown_hours: 2  # Global kill lasts 2 hours before auto-reset
 
   # Bid-ask spread filter
   max_spread_bps: 8  # Reject trades where spread > 8 basis points
 
   # Leverage limits
   leverage_limits:
-    low_volatility: 15     # < 2% volatility
-    medium_volatility: 15   # 2-5% volatility
-    high_volatility: 15     # > 5% volatility
+    low_volatility: 10     # < 2% volatility
+    medium_volatility: 10   # 2-5% volatility
+    high_volatility: 10     # > 5% volatility
 
   # Correlation limits
   max_correlated_positions: 3  # Max positions with correlation > 0.7
@@ -73,17 +93,17 @@ risk:
   volatility_gate_threshold_pct: 0.05  # Block trades if volatility > 5%
 
   # SL/TP distance multipliers (ATR-based)
-  sl_atr_multiplier: 1.2       # SL = 1.2 ATR (wider stops, give positions room to breathe)
-  tp_atr_multiplier: 2.5       # TP = 2.5 ATR — wider targets to maintain R:R with wider SL
-  min_rr_ratio: 2.0            # Enforce 2.0:1 R:R (positive EV at 40% win rate)
-  min_sl_distance_pct: 0.006   # 0.6% floor to prevent too-tight stops
+  sl_atr_multiplier: 1.0       # SL = 1.0 ATR (one normal 5m bar range)
+  tp_atr_multiplier: 1.5       # TP = 1.5 ATR — achievable in 5-15 min window
+  min_rr_ratio: 1.5            # Enforce 1.5:1 R:R (positive EV at 45% win rate)
+  min_sl_distance_pct: 0.003   # 0.3% floor (5m ATR is already wider)
   leverage_based_tp: false     # Disabled: 2.5% TP unreachable in 10min. Using ATR-based instead
 
   # Position sizing method
   position_sizing:
     method: "fixed_percentage"  # kelly_criterion | fixed_percentage | atr_based
-    min_position_pct: 0.20  # 20% fixed allocation per position (margin)
-    max_position_pct: 0.20  # 20% fixed allocation per position (margin)
+    min_position_pct: 0.13  # 13% of equity as margin ($83 × 0.13 × 10x = ~$108 notional, clears $100 min)
+    max_position_pct: 0.15  # 15% of equity as margin ($83 × 0.15 × 10x = ~$125 notional)
     kelly_fraction: 0.5  # Half Kelly for safety
     atr_multiplier: 2.0  # For ATR-based stop loss
 
@@ -171,7 +191,7 @@ execution:
     taker_bps: 5  # 0.05% taker fee
     pre_trade_fee_filter:
       enabled: true
-      fee_buffer_multiplier: 3.0  # Expected profit must be >= 3x round-trip fees (was 1.5x — barely above breakeven)
+      fee_buffer_multiplier: 3.0  # Expected profit must be >= 3x round-trip fees (wider 5m ATR targets clear fees naturally)
 
   # Hybrid mode settings
   hybrid:
@@ -236,10 +256,10 @@ strategies:
   enabled:
     - "ema_crossover_scalp"    # Trend-following: EMA crossover with convergence pre-signal
     - "rsi_pullback_scalp"     # Mean reversion in trend: buy dips/sell rallies
-    - "vwap_bounce_scalp"      # Mean reversion: VWAP cross with volume confirmation
     - "bollinger_squeeze_scalp" # Volatility breakout: squeeze then expansion
-    # orderbook_imbalance_scalp: DISABLED — noise-based signals, no edge
-    # momentum_breakout_scalp: DISABLED — needs stronger trend regime filter
+    - "momentum_breakout_scalp" # Volume-confirmed momentum (relative_volume >= 1.5 = strongest filter)
+    # vwap_bounce_scalp: DISABLED — 65% of trades at 34% WR, -$139 PnL
+    # orderbook_imbalance_scalp: DISABLED — open interest stubbed to 0, unreliable
 
   # Strategy-specific parameters
   ema_crossover_scalp:
@@ -295,6 +315,31 @@ learning:
   regime_confidence_boost: 0.08          # +8% confidence for proven regime fit
   regime_confidence_penalty: 0.10        # -10% confidence for poor regime fit
 
+# Funding Rate as Directional Signal (contrarian alpha)
+# Extreme funding = crowded positioning. Trade against the crowd.
+funding_rate_signal:
+  enabled: true
+  strong_positive_threshold: 0.0008  # 0.08%/8h = crowded longs → boost shorts
+  strong_negative_threshold: -0.0005 # -0.05%/8h = crowded shorts → boost longs
+  boost_pct: 0.08   # +8% confidence for contrarian signals
+  penalty_pct: 0.08  # -8% confidence for same-direction signals
+
+# Time-of-Day Confidence Windows (structural volume patterns)
+# US session + documented 21-23 UTC edge = higher confidence; Asia dead zone = lower
+time_of_day:
+  enabled: true
+  high_confidence_hours_utc: [13, 14, 15, 16, 21, 22]  # US session + documented edge
+  low_confidence_hours_utc: [0, 1, 2, 3, 4, 5, 6, 7]    # Asia dead zone (thin books, 00-07 UTC)
+  boost_pct: 0.05
+  penalty_pct: 0.05
+
+# Paper Trading Dashboard
+paper_dashboard:
+  enabled: true
+  report_interval_minutes: 60     # Generate report every 60 minutes
+  reports_dir: "reports"          # Directory for markdown reports
+  simulate_sl_tp: true            # Simulate SL/TP using real 1m klines after close
+
 # Trailing Stop Configuration (Ratcheting TP/SL)
 trailing_stop:
   enabled: true
@@ -317,14 +362,14 @@ trailing_stop:
   # Dynamic SL adjustment (move SL to breakeven, then trail)
   dynamic_sl:
     enabled: true
-    breakeven_move_pct: 0.004    # Move SL to breakeven at 0.4% profit (lock in earlier)
-    trail_activation_pct: 0.008  # Start trailing at 0.8% profit (was 1.2%)
-    trail_step_pct: 0.003        # SL trails 0.3% behind price (tighter trail)
+    breakeven_move_pct: 0.005    # Move SL to breakeven at 0.5% profit (0.3% was too tight, clipped by noise)
+    trail_activation_pct: 0.005  # Start trailing at 0.5% profit
+    trail_step_pct: 0.002        # SL trails 0.2% behind price (tighter trail)
     min_move_pct: 0.001          # Only move SL if change > 0.1%
 
   # Dynamic TP/SL recalculation (ATR-based, replaces Binance-side orders)
   dynamic_tp_sl:
-    enabled: true
+    enabled: false
     recalc_threshold_pct: 0.004   # Recalculate when price moves 0.4% from last calc
     use_current_atr: true
     tp_atr_multiplier: 2.0        # TP = current_price +/- ATR * mult

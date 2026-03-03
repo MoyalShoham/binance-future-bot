@@ -1,259 +1,226 @@
-# Multi-Agent Trading System - Setup Guide
+# Setup Guide
 
-## Quick Setup (Recommended)
+**Last Updated**: 2026-03-03
 
-### Option 1: Automated Setup (Windows Batch)
+---
 
-1. **Double-click** `setup_conda_env.bat`
-2. Wait 3-5 minutes for installation
-3. Done! ✅
+## Prerequisites
 
-### Option 2: Automated Setup (PowerShell)
+- Python 3.11+ (via local conda environment at `.conda/`)
+- Binance Futures account with API keys (mainnet)
+- Anthropic API key (for regime detection)
+- Optional: CryptoPanic API key (for news-driven symbol scanning)
 
-1. **Right-click** `setup_conda_env.ps1` → Run with PowerShell
-2. Wait 3-5 minutes for installation
-3. Done! ✅
+---
 
-### Option 3: Manual Setup
+## Environment
 
-Open **Anaconda Prompt** or **Command Prompt** and run:
+The project uses a local conda environment at `.conda/` in the project root. All commands use the local Python interpreter directly:
+
+```powershell
+# PowerShell syntax (Windows)
+& '.\.conda\python.exe' main.py --mode paper --symbol BTCUSDT
+```
+
+### Install Dependencies
+
+```powershell
+& '.\.conda\python.exe' -m pip install -r requirements.txt
+```
+
+---
+
+## Configuration
+
+### `.env` - API Credentials
 
 ```bash
-# Navigate to project directory
-cd C:\Users\User\Desktop\binance-future-bot
+BINANCE_API_KEY=your_mainnet_key
+BINANCE_API_SECRET=your_mainnet_secret
+ANTHROPIC_API_KEY=your_anthropic_key       # Required for regime detection
+CRYPTOPANIC_API_KEY=your_cryptopanic_key   # Optional: news-driven symbol scanning
+```
 
-# Create conda environment
-conda create -n trading-system python=3.11 -y
+### `config/trading_config.yaml` - Trading Parameters
 
-# Activate environment
-conda activate trading-system
+Single source of truth for all parameters. Key settings:
 
-# Upgrade pip
-python -m pip install --upgrade pip
+```yaml
+trading:
+  enabled: true
+  execution_mode: "live"   # paper | live | hybrid
+  testnet: false           # Mainnet
+  max_concurrent_positions: 1
+  default_leverage: 10
 
-# Install dependencies
-pip install -r requirements.txt
+risk:
+  max_risk_per_trade_pct: 0.02      # 2% per trade
+  max_daily_drawdown_pct: 0.80      # 60% daily drawdown limit
+  max_portfolio_exposure_pct: 0.55  # 55% max deployed
+  max_position_concentration_pct: 1.0  # 100% (single coin mode)
 ```
 
 ---
 
 ## Running the System
 
-### Quick Test (Single Cycle)
+### Paper Trading (Single Symbol)
 
-**Method 1: Use the run script**
-- Double-click `run_trading_system.bat`
-
-**Method 2: Manual command**
-```bash
-# Activate environment first
-conda activate trading-system
-
-# Run single cycle
-python main.py --mode paper --symbol BTCUSDT
+```powershell
+& '.\.conda\python.exe' main.py --mode paper --symbol BTCUSDT --continuous --interval 30
 ```
 
-### Continuous Trading (Every 5 Minutes)
+### Live Trading (All Symbols, Dynamic Scanner)
 
-```bash
-conda activate trading-system
-python main.py --mode paper --symbol BTCUSDT --continuous --interval 300
+```powershell
+& '.\.conda\python.exe' main.py --mode live --symbol all --continuous --interval 5
 ```
 
-### Test Different Symbols
+The symbol scanner automatically discovers hot symbols every ~5 minutes from:
+- Binance movers (top gainers/losers by 24h change)
+- CoinGecko trending coins
+- CryptoPanic news (if API key configured)
+- Always includes blue-chips: BTC, ETH, SOL, XRP
 
-```bash
-# Bitcoin
-python main.py --mode paper --symbol BTCUSDT
+### Live Trading (Single Symbol)
 
-# Ethereum
-python main.py --mode paper --symbol ETHUSDT
-
-# Solana
-python main.py --mode paper --symbol SOLUSDT
+```powershell
+& '.\.conda\python.exe' main.py --mode live --symbol BTCUSDT --continuous --interval 5
 ```
 
----
+### Single Cycle (Testing)
 
-## What Happens During a Trading Cycle
-
+```powershell
+& '.\.conda\python.exe' main.py --mode paper --symbol BTCUSDT
 ```
-1. Research Coordinator Agent
-   ✓ Fetches BTCUSDT market data from Binance testnet
-   ✓ Calculates technical indicators (EMA, RSI, MACD, ATR)
-   ✓ Analyzes market sentiment
-   ✓ Classifies market regime
 
-2. Trading Decision Agent
-   ✓ Evaluates 4 scalping strategies
-   ✓ Selects best signal (if confidence >= 70%)
-   ✓ Calculates entry/exit levels
-   ✓ Estimates position size
+### PowerShell Startup Script
 
-3. Risk Management Agent (GLOBAL AUTHORITY)
-   ✓ Runs 9 risk checks
-   ✓ Validates against kill switches
-   ✓ Approves/Rejects/Modifies trade
-
-4. Execution Agent
-   ✓ Simulates order execution (paper mode)
-   ✓ Calculates realistic slippage
-   ✓ Places stop loss & take profit orders
-
-5. Storage & Reporting Agent
-   ✓ Saves all data to database
-   ✓ Creates audit trail
-   ✓ Generates reports
-
-6. Emergency Controller (background)
-   ✓ Monitors system health
-   ✓ Checks kill switches
-   ✓ Detects anomalies
+```powershell
+.\start.ps1  # Launches Ollama + bot
 ```
 
 ---
 
 ## Execution Modes
 
-### PAPER Mode (Current - Safe)
-- **No real money**
-- Simulates orders with realistic slippage
-- Perfect for testing
-- Uses Binance testnet API
+### PAPER Mode
+- No real money — simulates orders with realistic slippage
+- Uses live Binance market data (mainnet)
+- Perfect for testing strategies
+- Configurable simulated balance in config
 
-### LIVE Mode (After Testing)
-- **Real money** - use with caution!
-- Actual orders on Binance
-- Includes shadow paper execution for comparison
-- Requires thorough testing first
+### LIVE Mode (Production)
+- Real money on Binance Futures mainnet
+- Algo SL/TP orders placed on exchange
+- 12 risk checks on every trade
+- Kill switches for emergency stops
 
-### HYBRID Mode (Advanced)
+### HYBRID Mode
 - Runs both PAPER and LIVE simultaneously
 - Alerts if divergence > 0.5%
 - Best for validating execution quality
 
 ---
 
-## Configuration Files
+## What Happens During a Trading Cycle
 
-### `.env` - API Credentials
-```bash
-# Already configured with your keys ✓
-BINANCE_API_KEY=your_testnet_key
-BINANCE_API_SECRET=your_testnet_secret
-OPENAI_API_KEY=your_openai_key
-ANTHROPIC_API_KEY=your_claude_key
-GOOGLE_API_KEY=your_gemini_key
+```
+1. Symbol Scanner (if --symbol all)
+   ✓ Discovers hot symbols from multiple sources
+   ✓ Selects top 4-8 symbols per scan
+
+2. Research Coordinator
+   ✓ Fetches OHLCV, order book (depth=100), 24h ticker
+   ✓ Calculates EMA(9/21/50), VWAP, RSI, MACD, ATR, Bollinger Bands
+   ✓ Multi-timeframe HTF bias (1h/15m/5m)
+   ✓ WebSocket streaming with REST fallback
+
+3. Trading Decision
+   ✓ Evaluates 4 strategies (EMA crossover, RSI pullback, Bollinger squeeze, momentum breakout)
+   ✓ Learning system adjusts confidence (6 components)
+   ✓ Requires 75%+ confidence + 3+ confluence factors
+
+4. Risk Manager (GLOBAL AUTHORITY)
+   ✓ Runs 12 risk checks
+   ✓ Approves/Rejects/Modifies trade
+
+5. Execution Agent
+   ✓ Places market order + algo SL/TP orders
+   ✓ Order retry with exponential backoff
+
+6. Storage & Reporting
+   ✓ Persists all data to SQLite
+   ✓ SHA-256 hash chain audit trail
+
+7. Emergency Controller (background)
+   ✓ Health monitoring every 60s
+   ✓ Trailing stop monitor every 5s
+   ✓ Kill switch management
+   ✓ Orphan reconciliation
 ```
 
-### `config/trading_config.yaml` - Trading Parameters
-```yaml
-trading:
-  enabled: true
-  execution_mode: "paper"  # Start with paper!
-  testnet: true            # Use Binance testnet
+---
 
-risk:
-  max_risk_per_trade_pct: 0.02     # 2% max per trade
-  max_daily_drawdown_pct: 0.05     # 5% daily drawdown limit
-  max_portfolio_exposure_pct: 0.70 # 70% max deployed
+## Backtesting
+
+```powershell
+# Standard backtest
+& '.\.conda\python.exe' scripts/run_backtest.py --symbol BTCUSDT --start 2025-12-01 --end 2026-02-01 --interval 5m
+
+# Walk-forward validation
+& '.\.conda\python.exe' scripts/run_backtest.py --symbol BTCUSDT --start 2025-08-01 --end 2026-02-01 --walk-forward
 ```
 
 ---
 
 ## Troubleshooting
 
-### "conda: command not found"
-- Make sure Anaconda/Miniconda is installed
-- Use Anaconda Prompt instead of regular CMD
-
 ### "ModuleNotFoundError"
-- Activate environment: `conda activate trading-system`
-- Reinstall: `pip install -r requirements.txt`
+```powershell
+& '.\.conda\python.exe' -m pip install -r requirements.txt
+```
 
 ### "Binance API Error"
-- Check your testnet API keys in `.env`
-- Verify keys are from Binance Futures Testnet (not spot testnet)
+- Check API keys in `.env`
+- Verify keys have Futures trading permissions
+- Check IP whitelist settings
 
 ### "Database Error"
-- Delete `data/trading_system.db` and let it recreate
-- Check permissions on the `data/` folder
+- Delete `data/trading_system.db` and let it recreate on startup
+- Check write permissions on the `data/` folder
 
-### "Import Error: No module named 'langchain'"
-- Environment not activated
-- Run: `conda activate trading-system`
+### "Database locked"
+- WAL mode is enabled (should handle concurrent writes)
+- Check busy_timeout is set (5000ms default)
 
 ---
 
 ## Useful Commands
 
-```bash
-# Check environment
-conda env list
-
-# Activate environment
-conda activate trading-system
-
-# Deactivate environment
-conda deactivate
-
-# Update dependencies
-pip install -r requirements.txt --upgrade
+```powershell
+# Compile check all Python files
+& '.\.conda\python.exe' -m py_compile main.py
 
 # Run tests
-pytest tests/
+& '.\.conda\python.exe' -m pytest tests/
 
 # View database
 sqlite3 data/trading_system.db "SELECT * FROM trading_decisions LIMIT 5;"
 
-# Clean logs
-rm -rf logs/*
-
 # Check system status
-python -c "from main import *; print('System ready ✓')"
+& '.\.conda\python.exe' -c "from main import *; print('System ready')"
 ```
-
----
-
-## Next Steps After Setup
-
-1. **Run single test cycle** - Verify everything works
-2. **Check the logs** - Review console output
-3. **Inspect database** - See stored data
-4. **Run continuous mode** - Let it run for 1 hour
-5. **Analyze results** - Check strategy performance
-6. **Tune parameters** - Adjust risk limits if needed
-7. **Consider live trading** - Only after thorough testing!
 
 ---
 
 ## Safety Reminders
 
-✅ **Currently in PAPER mode** - No real money at risk
-✅ **Using testnet** - Safe Binance environment
-✅ **Kill switches enabled** - Emergency stop available
-✅ **Risk limits enforced** - 9 checks on every trade
+- **12 risk checks** enforce safety on every trade
+- **Kill switches** available (global, symbol, strategy)
+- **Consecutive loss cooldown**: 3 losses in 60min → 45min pause
+- **Global kill switch**: Auto-activates after 5 consecutive losses (2h shutdown)
+- **Trailing stop**: Dynamic SL with breakeven at 0.5% profit
+- **Max holding time**: 15 minutes (forced exit)
 
-⚠️ **Before going LIVE:**
-- Test in paper mode for at least 1 week
-- Verify all strategies work as expected
-- Start with small position sizes (10% of target)
-- Monitor continuously for first 24 hours
-
----
-
-## Support
-
-- Documentation: `IMPLEMENTATION_PROGRESS.md`
-- Risk system: `docs/RISK_MANAGEMENT.md`
-- Database guide: `docs/DATABASE_INTEGRATION.md`
-
----
-
-**Ready to trade? Run:**
-```bash
-conda activate trading-system
-python main.py --mode paper --symbol BTCUSDT
-```
-
-Good luck! 🚀
+See `docs/RISK_MANAGEMENT.md` for full risk controls.

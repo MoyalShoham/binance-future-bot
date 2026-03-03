@@ -51,7 +51,8 @@ class EmergencyControllerAgent(BaseAgent):
         db_session=None,
         model_router=None,
         trades_db=None,
-        ws_manager=None
+        ws_manager=None,
+        paper_dashboard=None
     ):
         """
         Initialize Emergency Controller Agent.
@@ -64,6 +65,7 @@ class EmergencyControllerAgent(BaseAgent):
             model_router: Optional ModelRouter for LLM enhancement
             trades_db: Optional TradesDB for flat trade records
             ws_manager: Optional BinanceWebSocketManager for cached price data
+            paper_dashboard: Optional PaperDashboard for paper trade tracking
         """
         super().__init__(agent_id, config, model_router=model_router)
 
@@ -74,7 +76,7 @@ class EmergencyControllerAgent(BaseAgent):
         self.kill_switch_manager = KillSwitchManager(config)
         self.system_monitor = SystemHealthMonitor(binance_client, db_session)
         self.anomaly_detector = AnomalyDetector(config)
-        self.trailing_stop_monitor = TrailingStopMonitor(binance_client, db_session, config, trades_db=trades_db, ws_manager=ws_manager)
+        self.trailing_stop_monitor = TrailingStopMonitor(binance_client, db_session, config, trades_db=trades_db, ws_manager=ws_manager, paper_dashboard=paper_dashboard)
 
         # Continuous monitoring
         self.monitoring_active = False

@@ -98,7 +98,7 @@ class TradingDecisionAgent(BaseAgent):
         self.fee_buffer_multiplier = fee_filter_config.get("fee_buffer_multiplier", 1.5)
 
         # Confidence threshold for trades
-        self.min_confidence = 0.70  # Minimum 70% confidence (confluence gate handles quality filtering)
+        self.min_confidence = 0.75  # Minimum 75% confidence (wider gap from base forces real confirmations)
 
         # Risk config filters
         risk_config = config.get("risk", {})
@@ -123,6 +123,22 @@ class TradingDecisionAgent(BaseAgent):
         self.hour_min_win_rate = learning_config.get("hour_min_win_rate", 0.30)
         self.regime_confidence_boost = learning_config.get("regime_confidence_boost", 0.08)
         self.regime_confidence_penalty = learning_config.get("regime_confidence_penalty", 0.10)
+
+        # ===== FUNDING RATE SIGNAL CONFIG =====
+        fr_config = config.get("funding_rate_signal", {})
+        self.funding_signal_enabled = fr_config.get("enabled", False)
+        self.fr_strong_positive = fr_config.get("strong_positive_threshold", 0.0008)
+        self.fr_strong_negative = fr_config.get("strong_negative_threshold", -0.0005)
+        self.fr_boost_pct = fr_config.get("boost_pct", 0.08)
+        self.fr_penalty_pct = fr_config.get("penalty_pct", 0.08)
+
+        # ===== TIME-OF-DAY CONFIG =====
+        tod_config = config.get("time_of_day", {})
+        self.tod_enabled = tod_config.get("enabled", False)
+        self.tod_high_hours = set(tod_config.get("high_confidence_hours_utc", []))
+        self.tod_low_hours = set(tod_config.get("low_confidence_hours_utc", []))
+        self.tod_boost_pct = tod_config.get("boost_pct", 0.05)
+        self.tod_penalty_pct = tod_config.get("penalty_pct", 0.05)
 
         # Learning cache: refreshed every 5 minutes to avoid DB spam
         self._learning_cache: Dict[str, Any] = {}
@@ -262,22 +278,20 @@ class TradingDecisionAgent(BaseAgent):
             if size_mult != 1.0:
                 position_size_usdt = round(position_size_usdt * size_mult, 2)
 
-            # Apply confluence size multiplier (Q3=0.5x, Q4=1.0x, Q5=1.2x)
+            # Apply confluence size multiplier (Q3=0.5x, Q4=0.75x, Q5=1.0x)
             confluence = self._last_confluence
             if confluence and confluence.get("size_multiplier", 1.0) != 1.0:
                 position_size_usdt = round(position_size_usdt * confluence["size_multiplier"], 2)
 
-            # Re-enforce min position size after multipliers
-            sizing_cfg = self.config.get("risk", {}).get("position_sizing", {})
-            min_pct = sizing_cfg.get("min_position_pct", 0.15)
-            equity = getattr(self, '_last_assumed_equity', 100.0)
-            min_notional = equity * min_pct * self.default_leverage
-            position_size_usdt = max(position_size_usdt, max(min_notional, 100.0))
+            # Re-enforce Binance $100 minimum after multipliers may have reduced size
+            if position_size_usdt < 100.0:
+                position_size_usdt = 100.0
 
             # Fee viability check: reject trades where expected profit < fees * buffer
             if decision != "NO_TRADE" and self.fee_filter_enabled:
                 fee_viable, fee_reason = self._check_fee_viability(
-                    entry_price, take_profit_levels, position_size_usdt
+                    entry_price, take_profit_levels, position_size_usdt,
+                    strategy_id=strategy_id
                 )
                 if not fee_viable:
                     logger.info("Fee filter rejection", symbol=symbol, reason=fee_reason)
@@ -532,6 +546,28 @@ class TradingDecisionAgent(BaseAgent):
                 if imbalance < -0.1:
                     confidence += 0.03
 
+        # Multi-timeframe enhancement (no-op when MTF disabled)
+        mtf = tech_ind.get("mtf_analysis")
+        if mtf and signal != "neutral":
+            if mtf.get("aligned"):
+                confidence += 0.08
+            macro = mtf.get("timeframes", {}).get("1h", {})
+            if macro:
+                if signal == "long" and macro["trend"] == "bullish" and macro.get("adx", 0) > 25:
+                    confidence += 0.05
+                elif signal == "short" and macro["trend"] == "bearish" and macro.get("adx", 0) > 25:
+                    confidence += 0.05
+                if signal == "long" and macro["trend"] == "bearish":
+                    confidence -= 0.10
+                elif signal == "short" and macro["trend"] == "bullish":
+                    confidence -= 0.10
+            intermediate = mtf.get("timeframes", {}).get("15m", {})
+            if intermediate:
+                if signal == "long" and intermediate.get("rsi", 50) > 75:
+                    confidence -= 0.05
+                elif signal == "short" and intermediate.get("rsi", 50) < 25:
+                    confidence -= 0.05
+
         return {
             "signal": signal,
             "confidence": min(1.0, confidence)
@@ -614,6 +650,28 @@ class TradingDecisionAgent(BaseAgent):
                 confidence += 0.03
             if relative_volume >= 2.0:
                 confidence += 0.04
+
+        # Multi-timeframe enhancement (no-op when MTF disabled)
+        mtf = tech_ind.get("mtf_analysis")
+        if mtf and signal != "neutral":
+            if mtf.get("aligned"):
+                confidence += 0.08
+            macro = mtf.get("timeframes", {}).get("1h", {})
+            if macro:
+                if signal == "long" and macro["trend"] == "bullish" and macro.get("adx", 0) > 25:
+                    confidence += 0.05
+                elif signal == "short" and macro["trend"] == "bearish" and macro.get("adx", 0) > 25:
+                    confidence += 0.05
+                if signal == "long" and macro["trend"] == "bearish":
+                    confidence -= 0.10
+                elif signal == "short" and macro["trend"] == "bullish":
+                    confidence -= 0.10
+            intermediate = mtf.get("timeframes", {}).get("15m", {})
+            if intermediate:
+                if signal == "long" and intermediate.get("rsi", 50) > 75:
+                    confidence -= 0.05
+                elif signal == "short" and intermediate.get("rsi", 50) < 25:
+                    confidence -= 0.05
 
         return {
             "signal": signal,
@@ -741,6 +799,11 @@ class TradingDecisionAgent(BaseAgent):
         tech_ind = research_summary.get("technical_indicators", {})
         market_data = research_summary.get("market_data", {})
 
+        # Volume confirmation: require at least average volume for pullback validity
+        relative_volume = tech_ind.get("relative_volume", 1.0)
+        if relative_volume < 1.0:
+            return {"signal": "neutral", "confidence": 0, "reason": "RSI pullback: insufficient volume"}
+
         rsi = tech_ind.get("rsi", 50)
         ema_21 = tech_ind.get("ema_21", 0)
         ema_50 = tech_ind.get("ema_50", 0)
@@ -796,6 +859,28 @@ class TradingDecisionAgent(BaseAgent):
                 confidence += 0.06
             if imbalance < -0.1:  # Sellers stepping in
                 confidence += 0.04
+
+        # Multi-timeframe enhancement (no-op when MTF disabled)
+        mtf = tech_ind.get("mtf_analysis")
+        if mtf and signal != "neutral":
+            if mtf.get("aligned"):
+                confidence += 0.08
+            macro = mtf.get("timeframes", {}).get("1h", {})
+            if macro:
+                if signal == "long" and macro["trend"] == "bullish" and macro.get("adx", 0) > 25:
+                    confidence += 0.05
+                elif signal == "short" and macro["trend"] == "bearish" and macro.get("adx", 0) > 25:
+                    confidence += 0.05
+                if signal == "long" and macro["trend"] == "bearish":
+                    confidence -= 0.10
+                elif signal == "short" and macro["trend"] == "bullish":
+                    confidence -= 0.10
+            intermediate = mtf.get("timeframes", {}).get("15m", {})
+            if intermediate:
+                if signal == "long" and intermediate.get("rsi", 50) > 75:
+                    confidence -= 0.05
+                elif signal == "short" and intermediate.get("rsi", 50) < 25:
+                    confidence -= 0.05
 
         return {
             "signal": signal,
@@ -885,6 +970,28 @@ class TradingDecisionAgent(BaseAgent):
                 if rsi < 40:
                     confidence += 0.03
 
+        # Multi-timeframe enhancement (no-op when MTF disabled)
+        mtf = tech_ind.get("mtf_analysis")
+        if mtf and signal != "neutral":
+            if mtf.get("aligned"):
+                confidence += 0.08
+            macro = mtf.get("timeframes", {}).get("1h", {})
+            if macro:
+                if signal == "long" and macro["trend"] == "bullish" and macro.get("adx", 0) > 25:
+                    confidence += 0.05
+                elif signal == "short" and macro["trend"] == "bearish" and macro.get("adx", 0) > 25:
+                    confidence += 0.05
+                if signal == "long" and macro["trend"] == "bearish":
+                    confidence -= 0.10
+                elif signal == "short" and macro["trend"] == "bullish":
+                    confidence -= 0.10
+            intermediate = mtf.get("timeframes", {}).get("15m", {})
+            if intermediate:
+                if signal == "long" and intermediate.get("rsi", 50) > 75:
+                    confidence -= 0.05
+                elif signal == "short" and intermediate.get("rsi", 50) < 25:
+                    confidence -= 0.05
+
         return {
             "signal": signal,
             "confidence": min(1.0, confidence)
@@ -919,7 +1026,12 @@ class TradingDecisionAgent(BaseAgent):
         score = 0
 
         # 1. Trend: HTF aligned + EMA direction agrees
-        htf_trend = tech_ind.get("htf_trend", "neutral")
+        # Use MTF consensus when available (stronger multi-TF signal)
+        mtf = tech_ind.get("mtf_analysis")
+        if mtf:
+            htf_trend = mtf.get("consensus", "neutral")
+        else:
+            htf_trend = tech_ind.get("htf_trend", "neutral")
         ema_9 = tech_ind.get("ema_9", 0)
         ema_21 = tech_ind.get("ema_21", 0)
         if is_long:
@@ -983,26 +1095,22 @@ class TradingDecisionAgent(BaseAgent):
             score += 1
 
         # Determine tier and size multiplier
-        # Q0-Q1: reject (0-1 factors = noise)
-        # Q2: trade with 0.5x size (marginal confirmation)
-        # Q3: trade with 0.75x size
-        # Q4: trade with 1.0x size
-        # Q5: trade with 1.2x size (full confluence)
-        if score <= 1:
+        # Q0-Q2: reject (0-2 factors = noise, not enough confirmation)
+        # Q3: trade with 0.50x size (minimum viable confluence)
+        # Q4: trade with 0.75x size (strong confluence)
+        # Q5: trade with 1.0x size (full confluence — no oversizing)
+        if score <= 2:
             tier = f"Q{score}"
             size_multiplier = 0.0  # NO_TRADE
-        elif score == 2:
-            tier = "Q2"
-            size_multiplier = 0.5
         elif score == 3:
             tier = "Q3"
-            size_multiplier = 0.75
+            size_multiplier = 0.5
         elif score == 4:
             tier = "Q4"
-            size_multiplier = 1.0
+            size_multiplier = 0.75
         else:
             tier = "Q5"
-            size_multiplier = 1.2
+            size_multiplier = 1.0
 
         return {
             "score": score,
@@ -1035,24 +1143,83 @@ class TradingDecisionAgent(BaseAgent):
         if hour_reject:
             hour_penalty = 0.05  # -5% for bad hours (soft, not blocking)
 
+        # Time-of-day structural confidence adjustment
+        tod_adjustment = 0.0
+        if self.tod_enabled:
+            utc_hour = datetime.now(timezone.utc).hour
+            if utc_hour in self.tod_high_hours:
+                tod_adjustment = self.tod_boost_pct
+            elif utc_hour in self.tod_low_hours:
+                tod_adjustment = -self.tod_penalty_pct
+
         # Find best signal after learning adjustments
         best_strategy = None
         best_signal = "neutral"
         best_confidence = 0.0
 
+        # First pass: collect active (non-neutral) signals and detect direction conflicts
+        active_directions = set()
+        for strategy_id, signal_data in strategy_signals.items():
+            signal = signal_data["signal"]
+            if signal in ("long", "short"):
+                active_directions.add(signal)
+
+        # Direction conflict: both LONG and SHORT active = ambiguous market
+        direction_conflict = len(active_directions) > 1
+
+        # Regime-strategy mismatch filter: trend strategies in ranging markets get heavy penalty
+        trend_strategies = {"momentum_breakout_scalp", "ema_crossover_scalp"}
+        mean_reversion_strategies = {"rsi_pullback_scalp", "bollinger_squeeze_scalp"}
+        regime_mismatch_penalty = 0.0
+        if market_regime.upper() in ("MEAN_REVERSION", "LOW_VOLATILITY"):
+            regime_mismatch_penalty = 0.20  # -20% for trend strategies in ranging market
+        elif market_regime.upper() in ("TREND_FOLLOWING", "GREED_EUPHORIA", "FEAR_CAPITULATION"):
+            regime_mismatch_penalty = 0.15  # -15% for mean-reversion strategies in trending market
+
         for strategy_id, signal_data in strategy_signals.items():
             signal = signal_data["signal"]
             confidence = signal_data["confidence"]
 
+            # Skip neutral signals — they should never win over active signals
+            if signal == "neutral":
+                continue
+
+            # Regime-strategy mismatch: penalize wrong strategy type for current regime
+            if regime_mismatch_penalty > 0:
+                if market_regime.upper() in ("MEAN_REVERSION", "LOW_VOLATILITY") and strategy_id in trend_strategies:
+                    confidence = max(0.0, confidence - regime_mismatch_penalty)
+                elif market_regime.upper() in ("TREND_FOLLOWING", "GREED_EUPHORIA", "FEAR_CAPITULATION") and strategy_id in mean_reversion_strategies:
+                    confidence = max(0.0, confidence - regime_mismatch_penalty)
+
             # Learning 3: Adjust confidence based on strategy's historical win rate
             confidence = self._apply_strategy_confidence_adjustment(strategy_id, confidence)
 
-            # Learning 4: Hour penalty (soft)
-            confidence = max(0.0, confidence - hour_penalty)
+            # Learning 4: Hour penalty + time-of-day structural adjustment (soft)
+            confidence = max(0.0, confidence - hour_penalty + tod_adjustment)
 
             # Learning 6: Adjust confidence based on strategy+regime historical fit
             if market_regime:
                 confidence = self._apply_regime_adjustment(strategy_id, market_regime, confidence)
+
+            # Direction conflict penalty: strategies disagree on direction
+            if direction_conflict:
+                confidence = max(0.0, confidence - 0.10)
+
+            # Funding rate directional signal (contrarian alpha)
+            if self.funding_signal_enabled and research_summary:
+                funding_rate = research_summary.get("market_data", {}).get("funding_rate", 0)
+                if funding_rate > self.fr_strong_positive:
+                    # Crowded longs: boost shorts, penalize longs
+                    if signal == "short":
+                        confidence = min(1.0, confidence + self.fr_boost_pct)
+                    elif signal == "long":
+                        confidence = max(0.0, confidence - self.fr_penalty_pct)
+                elif funding_rate < self.fr_strong_negative:
+                    # Crowded shorts: boost longs, penalize shorts
+                    if signal == "long":
+                        confidence = min(1.0, confidence + self.fr_boost_pct)
+                    elif signal == "short":
+                        confidence = max(0.0, confidence - self.fr_penalty_pct)
 
             if confidence > best_confidence:
                 best_confidence = confidence
@@ -1068,7 +1235,7 @@ class TradingDecisionAgent(BaseAgent):
                 confluence = self._calculate_confluence_score(research_summary, decision)
                 self._last_confluence = confluence  # Store for later use in execute()
 
-                if confluence["score"] <= 1:
+                if confluence["score"] <= 2:
                     logger.info(
                         "Confluence rejection",
                         strategy=best_strategy,
@@ -1079,10 +1246,16 @@ class TradingDecisionAgent(BaseAgent):
                     )
                     return "NO_TRADE", best_strategy, best_confidence
 
-                # Confluence bonus: +3% confidence per factor above 2
-                bonus_factors = confluence["score"] - 2
+                # Confluence bonus: +3% confidence per factor above 3
+                bonus_factors = confluence["score"] - 3
                 if bonus_factors > 0:
                     best_confidence = min(1.0, best_confidence + bonus_factors * 0.03)
+
+            # MTF full alignment bonus (all timeframes agree on direction)
+            if research_summary:
+                mtf = research_summary.get("technical_indicators", {}).get("mtf_analysis")
+                if mtf and mtf.get("aligned"):
+                    best_confidence = min(1.0, best_confidence + 0.05)
 
             return decision, best_strategy, best_confidence
         else:
@@ -1136,17 +1309,8 @@ class TradingDecisionAgent(BaseAgent):
         min_sl_distance = entry_price * min_sl_dist_pct
         sl_distance = max(sl_distance, min_sl_distance)
 
-        # Take profit distance: leverage-based or ATR-based
-        leverage_based_tp = risk_config.get("leverage_based_tp", False)
-        if leverage_based_tp:
-            # TP = SL distance * leverage (R:R naturally equals leverage)
-            tp_distance = sl_distance * self.default_leverage
-            # Regime TP multiplier scales on top (tp_mult not used in this path)
-            if regime_params:
-                tp_distance *= regime_params.get("tp_multiplier", 1.0)
-        else:
-            # ATR-based TP (regime multiplier already applied to tp_mult above)
-            tp_distance = atr * tp_mult
+        # Take profit distance: ATR-based (regime multiplier already applied to tp_mult above)
+        tp_distance = atr * tp_mult
         tp_distance = max(tp_distance, sl_distance * min_rr)
 
         if decision == "LONG":
@@ -1221,11 +1385,11 @@ class TradingDecisionAgent(BaseAgent):
         # Position sizing: allocate a percentage of equity as margin
         leverage = self.default_leverage
         sizing_config = self.config.get("risk", {}).get("position_sizing", {})
-        min_pct = sizing_config.get("min_position_pct", 0.15)
-        max_pct = sizing_config.get("max_position_pct", 0.25)
+        min_pct = sizing_config.get("min_position_pct", 0.13)
+        max_pct = sizing_config.get("max_position_pct", 0.15)
 
         # Use midpoint as base allocation (confluence/regime multipliers adjust later)
-        target_pct = (min_pct + max_pct) / 2  # 20%
+        target_pct = (min_pct + max_pct) / 2
         margin = assumed_equity * target_pct
         position_size = margin * leverage  # notional = margin * leverage
 
@@ -1234,8 +1398,17 @@ class TradingDecisionAgent(BaseAgent):
         max_notional = assumed_equity * max_pct * leverage
         position_size = max(min_notional, min(position_size, max_notional))
 
-        # Enforce Binance Futures minimum notional ($100)
-        position_size = max(position_size, 100.0)
+        # Binance Futures minimum notional is $100 — round UP to exactly $100
+        # if we're close but under (avoids exchange rejection)
+        if position_size < 100.0:
+            logger.warning(
+                "Position size below Binance $100 minimum, rounding up",
+                calculated=round(position_size, 2),
+                adjusted=100.0,
+                equity=assumed_equity,
+                margin_pct=round(100.0 / leverage / assumed_equity, 4) if assumed_equity > 0 else 0,
+            )
+            position_size = 100.0
 
         return round(position_size, 2)
 
@@ -1385,15 +1558,14 @@ class TradingDecisionAgent(BaseAgent):
     def _get_base_confidence(self, strategy_id: str) -> float:
         """
         Get data-driven base confidence for a strategy.
-        If 20+ trades: base = historical_win_rate * 0.9 (capped at 0.85).
-        If < 20 trades: base = 0.60 (conservative, forces strong confirmations).
+        If 20+ trades: base = win_rate * 0.85 (floor 0.50, cap 0.80).
+        If < 20 trades: base = 0.55.
+        Gap to min_confidence (0.75) is 0.20, forcing real confirmations (+0.20) to trade.
         """
         stats = self._learning_cache.get("strategy_stats", {}).get(strategy_id)
         if stats and stats.get("total_trades", 0) >= 20:
-            # Floor at 0.65 — learning adjustments in _make_decision() handle penalties separately
-            # Without a floor, bad historical win rate makes trading impossible (death spiral)
-            return max(0.65, min(0.85, stats["win_rate"] * 0.9))
-        return 0.65
+            return max(0.50, min(0.80, stats["win_rate"] * 0.85))
+        return 0.55
 
     # ========== PRE-FILTERS ==========
 
@@ -1435,14 +1607,27 @@ class TradingDecisionAgent(BaseAgent):
         self,
         entry_price: float,
         take_profit_levels: List[Dict[str, Any]],
-        position_size_usdt: float
+        position_size_usdt: float,
+        strategy_id: str = ""
     ) -> Tuple[bool, str]:
         """
         Check if expected profit exceeds round-trip fees * buffer multiplier.
+        Also rejects strategies with expected holding time < 2min (not enough
+        time to overcome fees + slippage on ultra-short scalps).
         Returns (is_viable, reason).
         """
         if not take_profit_levels or entry_price <= 0 or position_size_usdt <= 0:
             return True, ""
+
+        # Reject ultra-short strategies that can't overcome fees
+        min_holding_seconds = 120  # 2 minutes minimum
+        expected_holding = self._get_expected_holding_time(strategy_id)
+        if 0 < expected_holding < min_holding_seconds:
+            reason = (
+                f"fee_filter: strategy {strategy_id} expected holding time "
+                f"{expected_holding}s < {min_holding_seconds}s minimum"
+            )
+            return False, reason
 
         # Round-trip taker fees (entry + exit)
         round_trip_fee_rate = self.taker_bps / 10000 * 2
@@ -1673,8 +1858,8 @@ class TradingDecisionAgent(BaseAgent):
             return min(1.0, confidence + boost)
 
         # Weak performer: penalize confidence
-        if win_rate < 0.40:
-            penalty = min((0.40 - win_rate) * 0.5, 0.15)  # Max -15%
+        if win_rate < 0.45:
+            penalty = min((0.45 - win_rate) * 1.5, 0.25)  # Max -25%
             return max(0.0, confidence - penalty)
 
         return confidence

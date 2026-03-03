@@ -45,7 +45,12 @@
       "Bash(\"$SQLITE\" -header -column \"$DB\" \"SELECT close_reason, COUNT\\(*\\) as count, ROUND\\(AVG\\(realized_pnl_usdt\\), 4\\) as avg_pnl, ROUND\\(AVG\\(\\(julianday\\(exit_time\\) - julianday\\(created_at\\)\\) * 86400\\), 1\\) as avg_hold_secs FROM pnl_ledger WHERE is_closed = 1 GROUP BY close_reason ORDER BY count DESC;\")",
       "Bash(\"$SQLITE\" -header -column \"$DB\" \"SELECT date\\(exit_time\\) as day, COUNT\\(*\\) as trades, ROUND\\(SUM\\(realized_pnl_usdt\\), 4\\) as daily_pnl, ROUND\\(SUM\\(SUM\\(realized_pnl_usdt\\)\\) OVER \\(ORDER BY date\\(exit_time\\)\\), 4\\) as cumulative_pnl FROM pnl_ledger WHERE is_closed = 1 GROUP BY date\\(exit_time\\) ORDER BY day;\")",
       "Bash(./.conda/python.exe:*)",
-      "Bash(C:/Users/User/Desktop/binance-future-bot/.conda/python.exe:*)"
+      "Bash(C:/Users/User/Desktop/binance-future-bot/.conda/python.exe:*)",
+      "Bash(..condapython.exe:*)",
+      "Bash(sort:*)",
+      "Bash(grep:*)",
+      "Bash(timeout 45 ./.conda/python.exe:*)",
+      "Bash(timeout 120 ./.conda/python.exe:*)"
     ]
   }
 }

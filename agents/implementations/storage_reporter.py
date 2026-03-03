@@ -48,7 +48,7 @@ class StorageReporterAgent(BaseAgent):
     ❌ Modify stored data (immutability)
     """
 
-    def __init__(self, agent_id: str, config: Dict[str, Any], db_session: DatabaseSession, model_router=None, trades_db=None):
+    def __init__(self, agent_id: str, config: Dict[str, Any], db_session: DatabaseSession, model_router=None, trades_db=None, paper_dashboard=None):
         """
         Initialize Storage & Reporting Agent.
 
@@ -58,11 +58,13 @@ class StorageReporterAgent(BaseAgent):
             db_session: Database session instance
             model_router: Optional ModelRouter for LLM enhancement
             trades_db: Optional TradesDB for flat trade records
+            paper_dashboard: Optional PaperDashboard for paper trade tracking
         """
         super().__init__(agent_id, config, model_router=model_router)
         self.db_session = db_session
         self.queries = DatabaseQueries(db_session.get_session())
         self.trades_db = trades_db
+        self.paper_dashboard = paper_dashboard
 
         logger.debug(
             "Storage & Reporting Agent initialized",
@@ -148,6 +150,23 @@ class StorageReporterAgent(BaseAgent):
                                 execution_id=state["execution_result"]["execution_id"],
                             )
 
+                        # Record in paper dashboard
+                        if self.paper_dashboard:
+                            td = state.get("trading_decision") or {}
+                            od = state["execution_result"].get("order_details", {})
+                            self.paper_dashboard.record_trade_open(
+                                trade_id=state["execution_result"]["execution_id"],
+                                symbol=state["execution_result"]["symbol"],
+                                side=state["execution_result"]["side"],
+                                entry_price=od.get("avg_fill_price", 0),
+                                quantity=od.get("filled_quantity", 0),
+                                leverage=od.get("leverage", 1),
+                                strategy_id=td.get("strategy_id"),
+                                confidence=td.get("confidence"),
+                                sl_price=td.get("stop_loss"),
+                                tp_price=td.get("take_profit_levels", [None])[0] if td.get("take_profit_levels") else None,
+                            )
+
                     elif state["execution_result"].get("execution_status") == "REJECTED":
                         # Record rejected trade in flat trades DB
                         if self.trades_db:
@@ -160,6 +179,19 @@ class StorageReporterAgent(BaseAgent):
                                 confidence=td.get("confidence"),
                                 correlation_id=state.get("correlation_id"),
                                 decision_id=td.get("decision_id"),
+                            )
+
+                        # Record rejected in paper dashboard
+                        if self.paper_dashboard:
+                            td = state.get("trading_decision") or {}
+                            ra = state.get("risk_approval") or {}
+                            self.paper_dashboard.record_rejected_trade(
+                                trade_id=state["execution_result"]["execution_id"],
+                                symbol=state["execution_result"]["symbol"],
+                                side=state["execution_result"]["side"],
+                                strategy_id=td.get("strategy_id"),
+                                confidence=td.get("confidence"),
+                                rejection_reason=ra.get("rejection_reason"),
                             )
 
                 # Store audit trail entry

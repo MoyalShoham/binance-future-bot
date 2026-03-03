@@ -149,7 +149,22 @@ class ExecutionAgent(BaseAgent):
             if execution_result["execution_status"] in [ExecutionStatus.FILLED, ExecutionStatus.PARTIALLY_FILLED]:
 
                 if mode == ExecutionMode.PAPER:
-                    logger.info("Paper mode: skipping Binance-side SL/TP orders")
+                    # Assign synthetic SL/TP IDs so paper positions route through
+                    # _check_synced_position() (unified exit path) instead of legacy ratcheting
+                    execution_result["stop_loss_order"] = {
+                        "binance_order_id": "PAPER_SL",
+                        "stop_price": trading_decision.get("stop_loss"),
+                        "status": "PLACED",
+                    }
+                    tp_levels = trading_decision.get("take_profit_levels", [])
+                    tp_price = tp_levels[0]["price"] if tp_levels else None
+                    execution_result["take_profit_orders"] = [{
+                        "binance_order_id": "PAPER_TP",
+                        "price": tp_price,
+                        "quantity_pct": 1.0,
+                        "status": "PLACED",
+                    }]
+                    logger.info("Paper mode: assigned synthetic SL/TP IDs for unified exit path")
                 else:
                     # Place stop loss order
                     if self.place_stop_loss:

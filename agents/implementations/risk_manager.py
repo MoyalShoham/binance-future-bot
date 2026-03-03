@@ -686,7 +686,12 @@ class RiskManagerAgent(BaseAgent):
         }
 
     def _check_consecutive_losses(self, symbol: str) -> Dict[str, Any]:
-        """Check 12: Block trading if too many consecutive losses on this symbol."""
+        """Check 12: Block trading if too many consecutive losses on this symbol.
+
+        Two tiers:
+        - max_consecutive_losses (default 3) in lookback window → symbol cooldown (WARNING)
+        - 5 consecutive losses (any symbol) → global kill switch for 2 hours (CRITICAL)
+        """
         try:
             with self.db_session.session_scope() as session:
                 self.queries.session = session
@@ -694,6 +699,45 @@ class RiskManagerAgent(BaseAgent):
                     symbol, self.loss_lookback_minutes
                 )
 
+            # Tier 2: 5 consecutive losses → global kill switch for 2 hours
+            global_kill_threshold = self.config.get("risk", {}).get(
+                "consecutive_loss_cooldown", {}
+            ).get("global_kill_losses", 5)
+            if consecutive >= global_kill_threshold:
+                self.global_kill_switch = True
+                cooldown_hours = self.config.get("risk", {}).get(
+                    "consecutive_loss_cooldown", {}
+                ).get("global_kill_cooldown_hours", 2)
+                logger.critical(
+                    "GLOBAL KILL SWITCH ACTIVATED — consecutive loss limit reached",
+                    consecutive_losses=consecutive,
+                    threshold=global_kill_threshold,
+                    symbol=symbol,
+                    cooldown_hours=cooldown_hours,
+                )
+                # Schedule auto-deactivation after cooldown
+                import threading
+                def _deactivate_kill():
+                    logger.warning(
+                        "Global kill switch auto-deactivating after cooldown",
+                        cooldown_hours=cooldown_hours,
+                    )
+                    self.global_kill_switch = False
+                timer = threading.Timer(cooldown_hours * 3600, _deactivate_kill)
+                timer.daemon = True
+                timer.start()
+                return {
+                    "passed": False,
+                    "current_value": consecutive,
+                    "limit": global_kill_threshold,
+                    "severity": "critical",
+                    "message": (
+                        f"GLOBAL KILL: {consecutive} consecutive losses on {symbol} — "
+                        f"all trading disabled for {cooldown_hours}h"
+                    )
+                }
+
+            # Tier 1: symbol-level cooldown
             if consecutive >= self.max_consecutive_losses:
                 return {
                     "passed": False,

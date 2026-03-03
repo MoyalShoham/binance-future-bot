@@ -212,13 +212,16 @@ class ResearchCoordinatorAgent(BaseAgent):
         """
         Fetch market data and klines in parallel using ThreadPoolExecutor.
 
-        Runs all 5 Binance API calls concurrently instead of sequentially,
-        reducing data collection time from ~1-2s to ~300-400ms.
+        If multi_timeframe is enabled in config, fetches 4 timeframes (1h, 15m, 5m, 1m)
+        and computes weighted trend consensus. Otherwise falls back to 2-TF (base + HTF).
 
         Returns:
             Tuple of (market_data dict, technical_indicators dict)
         """
-        # Map scalp timeframe → higher timeframe for trend bias
+        mtf_config = self.config.get("trading", {}).get("multi_timeframe", {})
+        mtf_enabled = mtf_config.get("enabled", False)
+
+        # Map scalp timeframe → higher timeframe for trend bias (legacy 2-TF fallback)
         HTF_MAP = {"1m": "15m", "5m": "1h", "15m": "4h"}
         higher_tf = HTF_MAP.get(timeframe, "1h")
 
@@ -234,7 +237,13 @@ class ResearchCoordinatorAgent(BaseAgent):
                 if ws_book:
                     logger.debug("Using cached book ticker data", symbol=symbol)
 
-            with ThreadPoolExecutor(max_workers=6) as pool:
+            # Determine how many workers we need
+            tf_configs = mtf_config.get("timeframes", []) if mtf_enabled else []
+            base_workers = 4  # ticker, book, funding, OI
+            kline_workers = len(tf_configs) if mtf_enabled else 2  # MTF timeframes or base+HTF
+            max_workers = base_workers + kline_workers
+
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 # Only fetch ticker/book via REST if WebSocket cache is stale
                 ticker_fut = None
                 book_fut = None
@@ -253,26 +262,41 @@ class ResearchCoordinatorAgent(BaseAgent):
                 oi_fut = pool.submit(
                     self.binance_client.client.futures_open_interest, symbol=symbol
                 )
-                klines_fut = pool.submit(
-                    self.binance_client.get_klines,
-                    symbol=symbol, interval=timeframe, limit=self.lookback_periods
-                )
-                htf_klines_fut = pool.submit(
-                    self.binance_client.get_klines,
-                    symbol=symbol, interval=higher_tf, limit=50
-                )
 
-            # Collect results
+                if mtf_enabled and tf_configs:
+                    # Multi-timeframe: fetch all configured timeframes in parallel
+                    kline_futures = {}
+                    for tf_cfg in tf_configs:
+                        interval = tf_cfg["interval"]
+                        lookback = tf_cfg.get("lookback", 100)
+                        kline_futures[interval] = pool.submit(
+                            self.binance_client.get_klines,
+                            symbol=symbol, interval=interval, limit=lookback
+                        )
+                    logger.info(
+                        "MTF kline fetch started",
+                        symbol=symbol,
+                        timeframes=[tf["interval"] for tf in tf_configs],
+                    )
+                else:
+                    # Legacy 2-TF: base timeframe + one higher TF
+                    klines_fut = pool.submit(
+                        self.binance_client.get_klines,
+                        symbol=symbol, interval=timeframe, limit=self.lookback_periods
+                    )
+                    htf_klines_fut = pool.submit(
+                        self.binance_client.get_klines,
+                        symbol=symbol, interval=higher_tf, limit=50
+                    )
+
+            # Collect market data results
             funding_rate_data = funding_fut.result()
             open_interest_data = oi_fut.result()
-            klines = klines_fut.result()
-            htf_klines = htf_klines_fut.result()
 
             # Build market data from WS cache or REST fallback
             if ws_ticker:
                 current_price = ws_ticker["price"]
                 volume_24h = ws_ticker["volume_24h"]
-                # price_change_24h_pct not available from mini ticker — compute from open
                 open_price = ws_ticker.get("open", current_price)
                 price_change_pct = (current_price - open_price) / open_price if open_price > 0 else 0
             else:
@@ -282,7 +306,6 @@ class ResearchCoordinatorAgent(BaseAgent):
                 price_change_pct = float(ticker.get("priceChangePercent", 0)) / 100
 
             if ws_book:
-                # Compute top-of-book imbalance from bid/ask quantities
                 bid_qty = ws_book.get("best_bid_qty", 0)
                 ask_qty = ws_book.get("best_ask_qty", 0)
                 total_qty = bid_qty + ask_qty
@@ -308,32 +331,78 @@ class ResearchCoordinatorAgent(BaseAgent):
                 "order_book": order_book_data,
             }
 
-            # Build technical indicators from klines
-            if klines and len(klines) >= 50:
-                kline_price = float(klines[-1]["close"])
-                technical_indicators = self.indicators.calculate_all(klines, kline_price)
-            else:
-                logger.warning(f"Insufficient kline data for {symbol}")
-                technical_indicators = self._get_default_indicators()
+            # === MULTI-TIMEFRAME PATH ===
+            if mtf_enabled and tf_configs:
+                primary_tf = mtf_config.get("primary_timeframe", "1m")
 
-            # Higher timeframe trend bias (multi-TF confirmation)
-            # Relaxed: require EMA9 vs EMA21 alignment (not all 3 perfectly aligned)
-            htf_trend = "neutral"
-            if htf_klines and len(htf_klines) >= 50:
-                htf_indicators = self.indicators.calculate_all(htf_klines, current_price)
-                htf_ema9 = htf_indicators.get("ema_9", 0)
-                htf_ema21 = htf_indicators.get("ema_21", 0)
-                htf_ema50 = htf_indicators.get("ema_50", 0)
-                if htf_ema9 > htf_ema21 and htf_ema21 > htf_ema50:
-                    htf_trend = "bullish"
-                elif htf_ema9 < htf_ema21 and htf_ema21 < htf_ema50:
-                    htf_trend = "bearish"
-                elif htf_ema9 > htf_ema21:
-                    htf_trend = "weak_bullish"
-                elif htf_ema9 < htf_ema21:
-                    htf_trend = "weak_bearish"
-            technical_indicators["htf_trend"] = htf_trend
-            technical_indicators["htf_timeframe"] = higher_tf
+                # Collect klines and compute indicators for each timeframe
+                tf_indicators = {}
+                for tf_cfg in tf_configs:
+                    interval = tf_cfg["interval"]
+                    tf_klines = kline_futures[interval].result()
+                    if tf_klines and len(tf_klines) >= 50:
+                        tf_ind = self.indicators.calculate_all(tf_klines, current_price)
+                        tf_indicators[interval] = tf_ind
+                    else:
+                        logger.warning(f"Insufficient kline data for {symbol} {interval}")
+
+                # Use primary timeframe (1m) as the base technical_indicators
+                if primary_tf in tf_indicators:
+                    technical_indicators = tf_indicators[primary_tf]
+                elif tf_indicators:
+                    # Fallback to first available TF
+                    first_tf = list(tf_indicators.keys())[0]
+                    technical_indicators = tf_indicators[first_tf]
+                    logger.warning(f"Primary TF {primary_tf} missing, using {first_tf}")
+                else:
+                    logger.warning(f"No MTF kline data for {symbol}")
+                    technical_indicators = self._get_default_indicators()
+
+                # Classify multi-timeframe trend consensus
+                mtf_analysis = self._classify_mtf_trend(tf_indicators, tf_configs)
+                technical_indicators["htf_trend"] = mtf_analysis["consensus"]
+                technical_indicators["htf_timeframe"] = "mtf"
+                technical_indicators["mtf_analysis"] = mtf_analysis
+
+                logger.info(
+                    "MTF analysis complete",
+                    symbol=symbol,
+                    consensus=mtf_analysis["consensus"],
+                    weighted_score=mtf_analysis["weighted_score"],
+                    aligned=mtf_analysis["aligned"],
+                    timeframes=list(mtf_analysis["timeframes"].keys()),
+                )
+
+            # === LEGACY 2-TF PATH ===
+            else:
+                klines = klines_fut.result()
+                htf_klines = htf_klines_fut.result()
+
+                # Build technical indicators from base timeframe klines
+                if klines and len(klines) >= 50:
+                    kline_price = float(klines[-1]["close"])
+                    technical_indicators = self.indicators.calculate_all(klines, kline_price)
+                else:
+                    logger.warning(f"Insufficient kline data for {symbol}")
+                    technical_indicators = self._get_default_indicators()
+
+                # Higher timeframe trend bias
+                htf_trend = "neutral"
+                if htf_klines and len(htf_klines) >= 50:
+                    htf_indicators = self.indicators.calculate_all(htf_klines, current_price)
+                    htf_ema9 = htf_indicators.get("ema_9", 0)
+                    htf_ema21 = htf_indicators.get("ema_21", 0)
+                    htf_ema50 = htf_indicators.get("ema_50", 0)
+                    if htf_ema9 > htf_ema21 and htf_ema21 > htf_ema50:
+                        htf_trend = "bullish"
+                    elif htf_ema9 < htf_ema21 and htf_ema21 < htf_ema50:
+                        htf_trend = "bearish"
+                    elif htf_ema9 > htf_ema21:
+                        htf_trend = "weak_bullish"
+                    elif htf_ema9 < htf_ema21:
+                        htf_trend = "weak_bearish"
+                technical_indicators["htf_trend"] = htf_trend
+                technical_indicators["htf_timeframe"] = higher_tf
 
             logger.debug(
                 "Market data fetched (parallel)",
@@ -349,6 +418,102 @@ class ResearchCoordinatorAgent(BaseAgent):
         except Exception as e:
             logger.error(f"Failed to fetch market data: {e}")
             raise
+
+    def _classify_mtf_trend(
+        self,
+        tf_indicators: Dict[str, Dict[str, Any]],
+        tf_configs: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Classify trend per timeframe and compute weighted consensus.
+
+        Uses EMA alignment to classify each timeframe, then computes a
+        weighted score (-2 to +2) and consensus label.
+
+        Args:
+            tf_indicators: {interval: indicators_dict} from calculate_all()
+            tf_configs: List of timeframe config dicts with interval, role, weight
+
+        Returns:
+            {consensus, weighted_score, aligned, timeframes: {interval: {trend, rsi, adx, ...}}}
+        """
+        trend_scores = {"bullish": 1.0, "weak_bullish": 0.5, "neutral": 0.0,
+                        "weak_bearish": -0.5, "bearish": -1.0}
+
+        timeframes_data = {}
+        weighted_score = 0.0
+        total_weight = 0.0
+        trends = []
+
+        for tf_cfg in tf_configs:
+            interval = tf_cfg["interval"]
+            weight = tf_cfg.get("weight", 0.25)
+            ind = tf_indicators.get(interval)
+
+            if not ind:
+                continue
+
+            # Classify trend using EMA alignment
+            ema9 = ind.get("ema_9", 0)
+            ema21 = ind.get("ema_21", 0)
+            ema50 = ind.get("ema_50", 0)
+
+            if ema9 > ema21 and ema21 > ema50:
+                trend = "bullish"
+            elif ema9 < ema21 and ema21 < ema50:
+                trend = "bearish"
+            elif ema9 > ema21:
+                trend = "weak_bullish"
+            elif ema9 < ema21:
+                trend = "weak_bearish"
+            else:
+                trend = "neutral"
+
+            score = trend_scores[trend]
+            weighted_score += score * weight
+            total_weight += weight
+            trends.append(trend)
+
+            timeframes_data[interval] = {
+                "trend": trend,
+                "rsi": round(ind.get("rsi", 50), 2),
+                "adx": round(ind.get("adx", 0), 2),
+                "ema_9": ind.get("ema_9", 0),
+                "ema_21": ind.get("ema_21", 0),
+                "ema_50": ind.get("ema_50", 0),
+                "atr": ind.get("atr", 0),
+                "macd_histogram": ind.get("macd", {}).get("histogram", 0),
+            }
+
+        # Normalize weighted score
+        if total_weight > 0:
+            weighted_score = weighted_score / total_weight
+
+        # Map weighted score to consensus label
+        if weighted_score >= 0.7:
+            consensus = "bullish"
+        elif weighted_score >= 0.3:
+            consensus = "weak_bullish"
+        elif weighted_score <= -0.7:
+            consensus = "bearish"
+        elif weighted_score <= -0.3:
+            consensus = "weak_bearish"
+        else:
+            consensus = "neutral"
+
+        # Check full alignment: all timeframes agree on direction (all bullish-ish or all bearish-ish)
+        bullish_trends = {"bullish", "weak_bullish"}
+        bearish_trends = {"bearish", "weak_bearish"}
+        all_bullish = all(t in bullish_trends for t in trends) if trends else False
+        all_bearish = all(t in bearish_trends for t in trends) if trends else False
+        aligned = all_bullish or all_bearish
+
+        return {
+            "consensus": consensus,
+            "weighted_score": round(weighted_score, 3),
+            "aligned": aligned,
+            "timeframes": timeframes_data,
+        }
 
     def _get_default_indicators(self) -> Dict[str, Any]:
         """Return default indicators when calculation fails."""

@@ -133,7 +133,7 @@ The backtesting module (`backtesting/`, `scripts/run_backtest.py`) reuses live s
 - **Data Loader** downloads klines from Binance with pagination, caches as parquet in `data/historical/`
 - **Engine** walks bar-by-bar, computes indicators via `TechnicalIndicators.calculate_all()`, evaluates strategies, simulates fills at next candle open with slippage/fees
 - **HTF Trend** resampled from base candles (e.g. 5m→1h via 12x factor), EMA 9/21/50 alignment classified as bullish/weak_bullish/bearish/weak_bearish/neutral
-- **Confluence Gate** mirrors live system's 5-factor scoring (trend, momentum, ADX, volume, structure). Rejects score ≤ 1, scales position size by tier
+- **Confluence Gate** mirrors live system's 5-factor scoring (trend, momentum, ADX, volume, structure). Rejects score ≤ 2, scales position size by tier
 - **Walk-Forward Validation** trains on N days, tests on next M days, steps forward — only OOS results count
 
 ### Known Backtest Limitations (by design)
@@ -142,6 +142,7 @@ The backtesting module (`backtesting/`, `scripts/run_backtest.py`) reuses live s
 - EMA convergence pre-signal absent
 - Strategy base confidence hardcoded (0.72/0.75) vs adaptive in live
 - Market regime always DEFAULT (no LLM classification in backtest)
+- Multi-timeframe analysis disabled (MTF code guarded by `if mtf`, backtest uses single-HTF resampling)
 
 ## Known Gotchas
 
@@ -166,20 +167,24 @@ These bugs have been encountered and fixed. Be aware of them when modifying code
 |-----------|-------|
 | Max risk per trade | 2% |
 | Max daily drawdown | 60% |
-| Max portfolio exposure | 75% |
-| Max concentration/symbol | 25% |
-| Max concurrent positions | 3 |
-| Default leverage | 15x (range: 10-15x) |
-| Min position size | 15% of equity (margin) |
-| Max position size | 25% of equity (margin) |
-| Min R:R ratio | 2.5:1 |
-| Min SL distance | 0.4% |
-| Fee filter | 3.0x round-trip fees |
+| Max portfolio exposure | 55% |
+| Max concentration/symbol | 100% (single coin) |
+| Max concurrent positions | 1 |
+| Default leverage | 10x |
+| Min position size | 13% of equity (margin) |
+| Max position size | 15% of equity (margin) |
+| Min notional floor | $100 (Binance minimum, auto round-up) |
+| Min R:R ratio | 1.5:1 |
+| Min SL distance | 0.3% |
+| Fee filter | 3.0x round-trip fees + 2min min hold |
 | Funding rate limit | 0.05% |
-| Consecutive loss cooldown | 3 losses in 30min -> 15min pause |
-| Min confidence | 70% |
-| Confluence gate | 3+ of 5 factors required |
-| Scanner top_n | 4 symbols |
+| Consecutive loss cooldown | 3 losses in 60min -> 45min pause |
+| Global kill switch | 5 consecutive losses -> 2h shutdown |
+| Min confidence | 75% |
+| Confluence gate | 3+ of 5 factors required (score ≤ 2 rejected) |
+| Scanner | Enabled (dynamic multi-source) |
+| Strategies | 4 enabled (VWAP bounce disabled) |
+| Multi-timeframe | 1h/15m/5m (weights: 0.45/0.35/0.20), primary TF: 5m |
 | Max holding time | 15 min |
 
 ## Documentation

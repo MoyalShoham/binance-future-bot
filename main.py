@@ -28,9 +28,11 @@ from infrastructure.database import init_database, TradesDB
 from infrastructure.symbol_scanner import SymbolScanner
 from infrastructure.websocket_manager import BinanceWebSocketManager
 from infrastructure.regime_detector import RegimeDetector, RegimeState
+from infrastructure.paper_dashboard import PaperDashboard
 
-# Ensure logs directory exists
+# Ensure logs and reports directories exist
 os.makedirs("logs", exist_ok=True)
+os.makedirs("reports", exist_ok=True)
 
 # Set root logging level to INFO so structlog filter_by_level works correctly
 # Configure both console and file output
@@ -144,7 +146,7 @@ def initialize_binance_client(config: dict) -> BinanceFuturesClient:
     return client
 
 
-def initialize_agents(config: dict, binance_client: BinanceFuturesClient, db_session, model_router: ModelRouter, trades_db=None, ws_manager=None, regime_state=None) -> dict:
+def initialize_agents(config: dict, binance_client: BinanceFuturesClient, db_session, model_router: ModelRouter, trades_db=None, ws_manager=None, regime_state=None, paper_dashboard=None) -> dict:
     """
     Initialize all trading agents.
 
@@ -154,6 +156,7 @@ def initialize_agents(config: dict, binance_client: BinanceFuturesClient, db_ses
         db_session: Database session instance
         model_router: ModelRouter instance for LLM calls
         trades_db: Optional TradesDB for flat trade records
+        paper_dashboard: Optional PaperDashboard for paper trade tracking
 
     Returns:
         Dict of initialized agents
@@ -163,8 +166,8 @@ def initialize_agents(config: dict, binance_client: BinanceFuturesClient, db_ses
         "trading_decision": TradingDecisionAgent("trading-decision", config, model_router=model_router, binance_client=binance_client, db_session=db_session, regime_state=regime_state),
         "risk_manager": RiskManagerAgent("risk-manager", config, binance_client, db_session),  # NO model_router - stays rule-based
         "execution_agent": ExecutionAgent("execution-agent", config, binance_client, db_session, model_router=model_router),
-        "storage_reporter": StorageReporterAgent("storage-reporter", config, db_session, model_router=model_router, trades_db=trades_db),
-        "emergency_controller": EmergencyControllerAgent("emergency-controller", config, binance_client, db_session, model_router=model_router, trades_db=trades_db, ws_manager=ws_manager),
+        "storage_reporter": StorageReporterAgent("storage-reporter", config, db_session, model_router=model_router, trades_db=trades_db, paper_dashboard=paper_dashboard),
+        "emergency_controller": EmergencyControllerAgent("emergency-controller", config, binance_client, db_session, model_router=model_router, trades_db=trades_db, ws_manager=ws_manager, paper_dashboard=paper_dashboard),
     }
 
     logger.info("Agents initialized", agent_count=len(agents), llm_enabled=config.get("models", {}).get("enabled", True))
@@ -297,6 +300,12 @@ def main():
         # Initialize flat trades database
         trades_db = TradesDB("data/trades.db")
 
+        # Initialize paper dashboard (paper/hybrid modes)
+        paper_dashboard = None
+        if args.mode in ("paper", "hybrid") and config.get("paper_dashboard", {}).get("enabled", True):
+            paper_dashboard = PaperDashboard(config)
+            logger.info("Paper dashboard initialized")
+
         # Initialize Binance client
         binance_client = initialize_binance_client(config)
 
@@ -322,8 +331,12 @@ def main():
                 binance_client, config, regime_state, db_session=db_session
             )
 
+        # Give paper dashboard the binance client for SL/TP simulation
+        if paper_dashboard:
+            paper_dashboard.binance_client = binance_client
+
         # Initialize agents
-        agents = initialize_agents(config, binance_client, db_session, model_router, trades_db, ws_manager=ws_manager, regime_state=regime_state)
+        agents = initialize_agents(config, binance_client, db_session, model_router, trades_db, ws_manager=ws_manager, regime_state=regime_state, paper_dashboard=paper_dashboard)
 
         # Initialize coordinator
         coordinator = TradingCoordinator(config)
@@ -337,6 +350,10 @@ def main():
         emergency_controller = agents.get("emergency_controller")
         if emergency_controller:
             emergency_controller.start_continuous_monitoring()
+
+        # Start paper dashboard periodic reports
+        if paper_dashboard:
+            paper_dashboard.start_periodic_reports()
 
         # Start regime detector
         if regime_detector:
@@ -369,6 +386,22 @@ def main():
             logger.warning("Could not fetch open positions for symbol list", error=str(e))
 
         logger.info("Trading symbols", symbols=symbols, count=len(symbols))
+
+        # Low equity warning: each trade is ~13% of account at Binance $100 minimum
+        try:
+            balance = binance_client.get_account_balance()
+            equity = balance.get("total_equity", 0)
+            if 0 < equity < 200:
+                min_margin_pct = 100.0 / config.get("trading", {}).get("default_leverage", 10) / equity
+                logger.warning(
+                    "LOW EQUITY WARNING: each trade risks ~%.0f%% of account "
+                    "(Binance $100 minimum notional, equity $%.2f, leverage %dx)",
+                    min_margin_pct * 100,
+                    equity,
+                    config.get("trading", {}).get("default_leverage", 10),
+                )
+        except Exception:
+            pass
 
         # Subscribe WebSocket to initial symbols
         if ws_manager:
@@ -435,6 +468,16 @@ def main():
 
         if 'emergency_controller' in locals() and emergency_controller:
             emergency_controller.stop_continuous_monitoring()
+
+        # Generate final paper trading report and cleanup
+        if 'paper_dashboard' in locals() and paper_dashboard:
+            try:
+                report_path = paper_dashboard.generate_report()
+                if report_path:
+                    logger.info("Final paper trading report generated", path=report_path)
+            except Exception as e:
+                logger.warning("Failed to generate final paper report", error=str(e))
+            paper_dashboard.close()
 
         # Close database connections
         if 'trades_db' in locals() and trades_db:

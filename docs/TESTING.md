@@ -1,6 +1,10 @@
-# Testing Guide - Multi-Agent Trading System
+# Testing Guide
 
-## Quick Start Testing
+**Last Updated**: 2026-03-03
+
+---
+
+## Quick Start
 
 ### Step 1: Environment Setup
 
@@ -11,34 +15,16 @@ cp .env.example .env
 
 Edit `.env` with your credentials:
 ```env
-# Binance API (Get from: https://www.binance.com/en/my/settings/api-management)
 BINANCE_API_KEY=your_api_key_here
 BINANCE_API_SECRET=your_api_secret_here
-
-# Optional: AI Model APIs (can test without these)
-OPENAI_API_KEY=your_openai_key_here
 ANTHROPIC_API_KEY=your_anthropic_key_here
-GOOGLE_API_KEY=your_google_key_here
 ```
-
-**IMPORTANT**:
-- For testing, create a **Binance Testnet** account at https://testnet.binancefuture.com/
-- Use testnet API keys for safe testing
-- Set `testnet: true` in `config/trading_config.yaml`
 
 ### Step 2: Install Dependencies
 
-```bash
-pip install -r requirements.txt
+```powershell
+& '.\.conda\python.exe' -m pip install -r requirements.txt
 ```
-
-Key dependencies:
-- `python-binance` - Binance API
-- `pandas` - Data manipulation
-- `ta` - Technical indicators
-- `langchain` - Agent orchestration
-- `structlog` - Logging
-- `pyyaml` - Configuration
 
 ### Step 3: Configure for Testing
 
@@ -47,57 +33,30 @@ Edit `config/trading_config.yaml`:
 ```yaml
 trading:
   enabled: true
-  execution_mode: "paper"  # KEEP THIS FOR TESTING
-  testnet: true            # ADD THIS for testnet
-  max_concurrent_positions: 1  # Start with 1 position
-  default_leverage: 3      # Low leverage for testing
+  execution_mode: "paper"   # KEEP THIS FOR TESTING
+  testnet: false             # Uses mainnet market data
+  max_concurrent_positions: 1
+  default_leverage: 10
 
 risk:
-  max_risk_per_trade_pct: 0.01  # 1% for testing (lower than default)
-  max_daily_drawdown_pct: 0.03  # 3% for testing
+  max_risk_per_trade_pct: 0.02    # 2% per trade
+  max_daily_drawdown_pct: 0.80    # 60% daily drawdown limit
+  max_portfolio_exposure_pct: 0.55  # 55% max deployed
 ```
 
 ### Step 4: Run First Test (Single Cycle)
 
-```bash
-python main.py --mode paper --symbol BTCUSDT
+```powershell
+& '.\.conda\python.exe' main.py --mode paper --symbol BTCUSDT
 ```
 
-**Expected Output**:
-```
-INFO     Starting Multi-Agent AI Trading System
-INFO     Configuration loaded config_file=config/trading_config.yaml
-INFO     Environment variables loaded
-INFO     Binance client initialized testnet=False
-INFO     All agents initialized agent_count=6
-INFO     Starting trading cycle symbol=BTCUSDT mode=PAPER
-INFO     Research node started correlation_id=<uuid>
-INFO     Fetching complete market data symbol=BTCUSDT timeframe=5m
-INFO     Market data fetched successfully symbol=BTCUSDT
-INFO     Research node completed correlation_id=<uuid>
-INFO     Decision node started correlation_id=<uuid>
-INFO     Starting trading decision symbol=BTCUSDT market_regime=trending_up
-INFO     Decision node completed decision=LONG confidence=0.82
-INFO     Risk check node started correlation_id=<uuid>
-INFO     Starting risk evaluation symbol=BTCUSDT decision=LONG
-INFO     Trade approved as-is processing_time_ms=15.2
-INFO     Risk check node completed approval_status=APPROVED
-INFO     Execution node started correlation_id=<uuid>
-INFO     Order created symbol=BTCUSDT side=BUY order_type=MARKET order_id=12345
-INFO     Execution node completed status=FILLED mode=PAPER
-INFO     Storage node started correlation_id=<uuid>
-INFO     Trading cycle completed correlation_id=<uuid> total_time_ms=1250.5
+### Step 5: Run Continuous Mode
+
+```powershell
+& '.\.conda\python.exe' main.py --mode paper --symbol BTCUSDT --continuous --interval 30
 ```
 
-### Step 5: Run Continuous Mode (Testing)
-
-```bash
-python main.py --mode paper --symbol BTCUSDT --continuous --interval 120
-```
-
-This will run a trading cycle every 120 seconds (2 minutes).
-
-**Press Ctrl+C to stop gracefully.**
+Press Ctrl+C to stop gracefully.
 
 ---
 
@@ -106,30 +65,28 @@ This will run a trading cycle every 120 seconds (2 minutes).
 ### Test 1: Paper Trading - Basic Flow
 **Goal**: Verify full pipeline works end-to-end
 
-```bash
-python main.py --mode paper --symbol BTCUSDT
+```powershell
+& '.\.conda\python.exe' main.py --mode paper --symbol BTCUSDT
 ```
 
 **Check**:
-- ✅ Connects to Binance API
-- ✅ Fetches market data
-- ✅ Calculates indicators
-- ✅ Makes a decision (LONG/SHORT/NO_TRADE)
-- ✅ Risk Manager evaluates
-- ✅ Simulates execution
-- ✅ Logs everything
+- Connects to Binance API (mainnet)
+- Fetches market data (OHLCV, order book, ticker)
+- Calculates indicators (EMA, RSI, MACD, ATR, VWAP, Bollinger Bands)
+- Makes a decision (LONG/SHORT/NO_TRADE)
+- Risk Manager evaluates (12 checks)
+- Simulates execution
+- Logs everything
 
-### Test 2: Different Symbols
-**Goal**: Test with multiple symbols
+### Test 2: Multi-Symbol with Scanner
 
-```bash
-python main.py --mode paper --symbol ETHUSDT
-python main.py --mode paper --symbol BNBUSDT
-python main.py --mode paper --symbol SOLUSDT
+```powershell
+& '.\.conda\python.exe' main.py --mode paper --symbol all --continuous --interval 30
 ```
 
+**Check**: Scanner discovers symbols, rotates through them each cycle.
+
 ### Test 3: Risk Rejection
-**Goal**: Trigger risk rejection by modifying config
 
 Edit `config/trading_config.yaml`:
 ```yaml
@@ -137,65 +94,36 @@ risk:
   max_risk_per_trade_pct: 0.0001  # Very low - should reject most trades
 ```
 
-Run:
-```bash
-python main.py --mode paper --symbol BTCUSDT
+```powershell
+& '.\.conda\python.exe' main.py --mode paper --symbol BTCUSDT
 ```
 
 **Expected**: Risk Manager should REJECT or heavily MODIFY the trade.
 
-### Test 4: High Volatility NO_TRADE
-**Goal**: Test NO_TRADE decision in high volatility
+### Test 4: Kill Switch
 
-Wait for high volatility market conditions or test with volatile pairs.
-
-**Expected**: Trading Decision should return NO_TRADE if volatility > 5%.
-
-### Test 5: Continuous Trading
-**Goal**: Test system stability over time
-
-```bash
-python main.py --mode paper --symbol BTCUSDT --continuous --interval 60
+```powershell
+# Set in config: risk.kill_switches.global: true
+& '.\.conda\python.exe' main.py --mode paper --symbol BTCUSDT
 ```
 
-**Let it run for 10 minutes** (10 cycles).
+**Expected**: All trades REJECTED with "GLOBAL KILL SWITCH ACTIVE".
 
-**Monitor**:
-- Memory usage
-- Error rate
-- Decision quality
-- Risk approvals/rejections
+### Test 5: Continuous Stability
 
----
-
-## Troubleshooting
-
-### Issue: "Missing environment variables"
-**Solution**: Make sure `.env` exists and has `BINANCE_API_KEY` and `BINANCE_API_SECRET`
-
-### Issue: "Failed to connect to Binance API"
-**Solution**:
-- Check your API keys are correct
-- Ensure Binance API is accessible (not blocked by firewall)
-- Try testnet first: https://testnet.binancefuture.com/
-
-### Issue: "Module not found"
-**Solution**: Install dependencies:
-```bash
-pip install -r requirements.txt
+```powershell
+& '.\.conda\python.exe' main.py --mode paper --symbol BTCUSDT --continuous --interval 30
 ```
 
-### Issue: BinanceAPIException errors
-**Solution**:
-- Check API key permissions (need Futures trading enabled)
-- Verify API key is not IP-restricted
-- Check rate limits
+**Let it run for 30 minutes** (60 cycles). Monitor memory usage, error rate, decision quality.
 
-### Issue: "Risk Manager agent not registered"
-**Solution**: Make sure you're on the latest commit:
-```bash
-git pull origin feature/phase2-integration
+### Test 6: Backtest
+
+```powershell
+& '.\.conda\python.exe' scripts/run_backtest.py --symbol BTCUSDT --start 2025-12-01 --end 2026-02-01 --interval 5m
 ```
+
+**Check**: Downloads klines, runs bar-by-bar simulation, outputs metrics.
 
 ---
 
@@ -203,17 +131,21 @@ git pull origin feature/phase2-integration
 
 After running tests, verify:
 
-- [ ] **Connection**: System connects to Binance successfully
+- [ ] **Connection**: System connects to Binance mainnet successfully
 - [ ] **Market Data**: Fetches current price, order book, indicators
-- [ ] **Indicators**: Calculates EMA, RSI, MACD, etc.
-- [ ] **Regime Classification**: Correctly identifies market regime
-- [ ] **Strategy Selection**: Chooses appropriate strategy
+- [ ] **WebSocket**: Mini ticker + book ticker streams active
+- [ ] **Indicators**: Calculates EMA, RSI, MACD, ATR, VWAP, Bollinger Bands
+- [ ] **Multi-Timeframe**: HTF bias from 1h/15m/5m
+- [ ] **Strategy Selection**: Evaluates 4 enabled strategies
+- [ ] **Learning System**: Adjusts confidence from DB history
 - [ ] **Decision Making**: Makes LONG/SHORT/NO_TRADE decision
-- [ ] **Risk Checks**: All 8 risk checks execute
-- [ ] **Position Sizing**: Calculates Kelly Criterion correctly
-- [ ] **Leverage Adjustment**: Adjusts based on volatility
+- [ ] **Confluence Gate**: Requires 3+ of 5 factors
+- [ ] **Risk Checks**: All 12 risk checks execute
+- [ ] **Position Sizing**: Fixed percentage with min/max bounds
 - [ ] **Approval Logic**: APPROVED/REJECTED/MODIFIED correctly
 - [ ] **Paper Execution**: Simulates order with slippage
+- [ ] **Trailing Stop**: Background monitor tracks positions
+- [ ] **Regime Detection**: Claude Haiku classifies market regime
 - [ ] **Logging**: All events logged clearly
 - [ ] **Error Handling**: Gracefully handles errors
 - [ ] **Shutdown**: Ctrl+C stops gracefully
@@ -222,57 +154,50 @@ After running tests, verify:
 
 ## Performance Benchmarks
 
-Expected performance (single cycle):
+Expected performance (single cycle, no LLM calls):
 - **Total Time**: 1-3 seconds
-- **Research**: 500-1000ms (parallel sub-agents)
-- **Decision**: 200-500ms
-- **Risk Check**: 10-50ms
-- **Execution**: 100-300ms (paper mode)
-- **Storage**: 10-50ms
+- **Research**: 500-1000ms (REST API + indicator calculation)
+- **Decision**: 50-200ms (rule-based strategies)
+- **Risk Check**: 10-50ms (rule-based)
+- **Execution**: 100-500ms (Binance API for live, instant for paper)
+- **Storage**: 10-50ms (SQLite WAL mode)
 
-Slower performance might indicate:
-- Slow Binance API response
-- Network latency
-- AI model API calls (if integrated)
+With regime detection (every 15min):
+- **Regime Classification**: 1-3 seconds (Claude Haiku API call)
 
 ---
 
-## Next Steps After Testing
+## Troubleshooting
 
-Once testing is successful:
+### "Missing environment variables"
+Make sure `.env` exists with `BINANCE_API_KEY` and `BINANCE_API_SECRET`.
 
-1. **Run for 24 hours in paper mode** to gather data
-2. **Analyze results**: Win rate, drawdown, strategy performance
-3. **Tune parameters**: Adjust risk limits, strategy parameters
-4. **Add more symbols**: Test with multiple pairs
-5. **Consider live trading**: Only after extensive paper testing
+### "Failed to connect to Binance API"
+- Check API keys are correct and have Futures permissions
+- Ensure Binance API is accessible (not blocked by firewall)
+- Verify IP whitelist settings
+
+### "ModuleNotFoundError"
+```powershell
+& '.\.conda\python.exe' -m pip install -r requirements.txt
+```
+
+### "Database locked"
+WAL mode should handle concurrent writes. If persistent, delete `data/trading_system.db` and restart.
 
 ---
 
 ## Safety Reminders
 
-⚠️ **NEVER**:
-- Run in `live` mode without extensive paper testing
-- Use high leverage (>5x) until proven successful
-- Trade without understanding the strategies
-- Ignore risk warnings or red flags
+**NEVER**:
+- Run in `live` mode without paper testing first
 - Disable risk checks or kill switches
+- Ignore consecutive loss cooldowns
 
-✅ **ALWAYS**:
+**ALWAYS**:
 - Start with paper trading
-- Use small position sizes
-- Monitor daily
-- Keep kill switches accessible
+- Monitor the logs
 - Understand each trade decision
+- Keep kill switches accessible
 
----
-
-## Support
-
-If you encounter issues:
-1. Check logs for error messages
-2. Review `IMPLEMENTATION_SUMMARY.md`
-3. Check agent definitions in `agents/` folder
-4. Review configuration in `config/trading_config.yaml`
-
-Happy Testing! 🚀
+See `docs/RISK_MANAGEMENT.md` for full risk controls.
